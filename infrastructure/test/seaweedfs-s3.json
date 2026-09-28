@@ -1,0 +1,1 @@
+{"identities":[{"name":"disposable-ci-test","credentials":[{"accessKey":"dev-access","secretKey":"dev-secret-only-for-loopback"}],"actions":["Admin"]}]}

@@ -1,0 +1,21 @@
+{
+  "name": "universal-rights-platform",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test packages/core/test/*.test.ts packages/postgres/test/*.test.ts packages/aws-kms/test/*.test.ts packages/aws-s3/test/*.test.ts packages/openbao/test/*.test.ts packages/axinom/test/*.test.ts packages/api/test/*.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "26.5.1",
+    "@types/pg": "8.23.1",
+    "typescript": "7.0.2"
+  },
+  "engines": {
+    "node": ">=26.0.0"
+  }
+}

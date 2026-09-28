@@ -1,0 +1,11 @@
+{
+  "name": "@drm/aws-kms",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@aws-sdk/client-kms": "3.1141.0",
+    "@drm/core": "0.1.0"
+  },
+  "exports": { ".": "./src/index.ts" }
+}

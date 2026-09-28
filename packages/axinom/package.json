@@ -1,0 +1,12 @@
+{
+  "name": "@drm/axinom",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@drm/core": "0.1.0"
+  }
+}

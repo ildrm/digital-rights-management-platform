@@ -1,0 +1,93 @@
+name: Verify foundation
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: drm_test_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d drm_test_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '26'
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm audit --audit-level=high
+      - name: Generate dependency SBOM
+        run: npm sbom --sbom-format cyclonedx > sbom.cdx.json
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dependency-sbom
+          path: sbom.cdx.json
+          if-no-files-found: error
+      - name: Migrate disposable database
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d drm_test_ci -f infrastructure/postgres/001_core.sql
+          psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d drm_test_ci -f infrastructure/postgres/002_issuance.sql
+          psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d drm_test_ci -f infrastructure/postgres/003_api_limits.sql
+          psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d drm_test_ci -f infrastructure/postgres/004_device_enrollment.sql
+          psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d drm_test_ci -f infrastructure/postgres/005_outbox.sql
+          psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d drm_test_ci -f infrastructure/postgres/006_asset_packages.sql
+          psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d drm_test_ci -f infrastructure/postgres/007_publish_rate.sql
+          psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d drm_test_ci -c "CREATE ROLE drm_app_test LOGIN PASSWORD 'test-only'"
+          psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d drm_test_ci -c "GRANT USAGE ON SCHEMA drm TO drm_app_test"
+          psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d drm_test_ci -c "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA drm TO drm_app_test"
+      - name: Start disposable self-hosted providers
+        run: |
+          docker run -d --rm --name drm-ci-bao -p 127.0.0.1:18200:8200 --entrypoint bao ghcr.io/openbao/openbao:2.7.0 server -dev -dev-root-token-id=dev-only-token -dev-listen-address=0.0.0.0:8200
+          docker run -d --rm --name drm-ci-s3 -p 127.0.0.1:18333:8333 -v "$PWD/infrastructure/test/seaweedfs-s3.json:/etc/seaweedfs/s3.json:ro" --entrypoint weed ghcr.io/chrislusf/seaweedfs:4.47 mini -dir=/data -bucket=drm-private-packages -s3.config=/etc/seaweedfs/s3.json
+          for i in {1..60}; do
+            if curl -fsS http://127.0.0.1:18200/v1/sys/health > /dev/null && (echo > /dev/tcp/127.0.0.1/18333) 2>/dev/null; then break; fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:18200/v1/sys/health > /dev/null
+          (echo > /dev/tcp/127.0.0.1/18333)
+          curl --fail-with-body -sS -X POST -H 'X-Vault-Token: dev-only-token' -H 'Content-Type: application/json' -d '{"type":"transit"}' http://127.0.0.1:18200/v1/sys/mounts/transit
+          curl --fail-with-body -sS -X POST -H 'X-Vault-Token: dev-only-token' -H 'Content-Type: application/json' -d '{"type":"ed25519","exportable":false}' http://127.0.0.1:18200/v1/transit/keys/license-sign
+          curl --fail-with-body -sS -X POST -H 'X-Vault-Token: dev-only-token' -H 'Content-Type: application/json' -d '{"type":"aes256-gcm96","derived":true,"exportable":false}' http://127.0.0.1:18200/v1/transit/keys/tenant-key
+      - name: Unit, HTTP, PostgreSQL, OpenBao, and SeaweedFS integration tests
+        env:
+          PG_TEST: '1'
+          API_TEST: '1'
+          BAO_TEST: '1'
+          BAO_TEST_TOKEN: dev-only-token
+          S3_TEST: '1'
+          S3_TEST_ACCESS: dev-access
+          S3_TEST_SECRET: dev-secret-only-for-loopback
+          SELFHOST_TEST: '1'
+          PG_TEST_DATABASE: drm_test_ci
+          PG_TEST_HOST: 127.0.0.1
+          PG_TEST_PORT: '5432'
+          PG_TEST_USER: drm_app_test
+          PGPASSWORD: test-only
+        run: npm test
+      - name: Stop disposable providers
+        if: always()
+        run: docker stop drm-ci-bao drm-ci-s3 || true
+      - name: Build API image
+        run: docker build -t drm-api:ci .
