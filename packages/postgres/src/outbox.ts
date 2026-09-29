@@ -48,7 +48,8 @@ export async function claimOutboxEvents(
     }>(
       `WITH candidates AS (
          SELECT id FROM drm.outbox_events
-         WHERE tenant_id = $1 AND delivered_at IS NULL AND available_at <= clock_timestamp()
+         WHERE tenant_id = $1 AND delivered_at IS NULL AND dead_lettered_at IS NULL
+           AND available_at <= clock_timestamp()
            AND (claimed_until IS NULL OR claimed_until < clock_timestamp())
          ORDER BY available_at, created_at, id
          FOR UPDATE SKIP LOCKED LIMIT $3
@@ -74,7 +75,7 @@ export async function markOutboxDelivered(pool: Pool, tenantId: string, eventId:
       `UPDATE drm.outbox_events
        SET delivered_at = clock_timestamp(), claimed_by = NULL, claimed_until = NULL
        WHERE tenant_id = $1 AND id = $2 AND claimed_by = $3
-         AND claimed_until > clock_timestamp() AND delivered_at IS NULL`,
+         AND claimed_until > clock_timestamp() AND delivered_at IS NULL AND dead_lettered_at IS NULL`,
       [tenantId, eventId, workerId],
     );
     return result.rowCount === 1;
@@ -83,18 +84,110 @@ export async function markOutboxDelivered(pool: Pool, tenantId: string, eventId:
 
 export async function releaseOutboxEvent(
   pool: Pool, tenantId: string, eventId: string, workerId: string, retryDelaySeconds: number,
+  errorCode: string | null = null,
 ): Promise<boolean> {
   worker(workerId);
   if (!Number.isSafeInteger(retryDelaySeconds) || retryDelaySeconds < 1 || retryDelaySeconds > 3600) {
     throw new DomainError('INVALID_OUTBOX_RETRY', 'Outbox retry delay is invalid');
   }
+  if (errorCode !== null && !/^[A-Z][A-Z0-9_]{0,127}$/.test(errorCode)) {
+    throw new DomainError('INVALID_OUTBOX_ERROR', 'Outbox error code is invalid');
+  }
   return withTenantTransaction(pool, tenantId, async (client) => {
     const result = await client.query(
       `UPDATE drm.outbox_events
-       SET available_at = clock_timestamp() + ($4 * interval '1 second'), claimed_by = NULL, claimed_until = NULL
-       WHERE tenant_id = $1 AND id = $2 AND claimed_by = $3 AND delivered_at IS NULL`,
-      [tenantId, eventId, workerId, retryDelaySeconds],
+       SET available_at = clock_timestamp() + ($4 * interval '1 second'),
+           last_error_code = $5, claimed_by = NULL, claimed_until = NULL
+       WHERE tenant_id = $1 AND id = $2 AND claimed_by = $3
+         AND claimed_until > clock_timestamp() AND delivered_at IS NULL AND dead_lettered_at IS NULL`,
+      [tenantId, eventId, workerId, retryDelaySeconds, errorCode],
     );
     return result.rowCount === 1;
   });
+}
+
+export async function deadLetterOutboxEvent(
+  pool: Pool, tenantId: string, eventId: string, workerId: string, errorCode: string,
+): Promise<boolean> {
+  worker(workerId);
+  if (!/^[A-Z][A-Z0-9_]{0,127}$/.test(errorCode)) {
+    throw new DomainError('INVALID_OUTBOX_ERROR', 'Outbox error code is invalid');
+  }
+  return withTenantTransaction(pool, tenantId, async (client) => {
+    const result = await client.query(
+      `UPDATE drm.outbox_events
+       SET dead_lettered_at = clock_timestamp(), last_error_code = $4,
+           claimed_by = NULL, claimed_until = NULL
+       WHERE tenant_id = $1 AND id = $2 AND claimed_by = $3
+         AND claimed_until > clock_timestamp() AND delivered_at IS NULL AND dead_lettered_at IS NULL`,
+      [tenantId, eventId, workerId, errorCode],
+    );
+    if (result.rowCount === 1) {
+      await client.query(
+        `INSERT INTO drm.audit_events (tenant_id, id, event_type, details)
+         VALUES ($1, $2, 'outbox.dead_lettered', $3)`,
+        [tenantId, randomUUID(), { eventId, errorCode }],
+      );
+    }
+    return result.rowCount === 1;
+  });
+}
+
+export async function requeueDeadLetterOutboxEvent(pool: Pool, tenantId: string, eventId: string): Promise<boolean> {
+  return withTenantTransaction(pool, tenantId, async (client) => {
+    const result = await client.query(
+      `UPDATE drm.outbox_events
+       SET dead_lettered_at = NULL, last_error_code = NULL, attempts = 0,
+           available_at = clock_timestamp()
+       WHERE tenant_id = $1 AND id = $2 AND dead_lettered_at IS NOT NULL
+         AND delivered_at IS NULL AND claimed_by IS NULL`,
+      [tenantId, eventId],
+    );
+    if (result.rowCount === 1) {
+      await client.query(
+        `INSERT INTO drm.audit_events (tenant_id, id, event_type, details)
+         VALUES ($1, $2, 'outbox.requeued', $3)`,
+        [tenantId, randomUUID(), { eventId }],
+      );
+    }
+    return result.rowCount === 1;
+  });
+}
+
+export interface OutboxDispatchResult {
+  readonly delivered: number;
+  readonly retried: number;
+  readonly deadLettered: number;
+}
+
+export async function dispatchOutboxBatch(
+  pool: Pool, tenantId: string, workerId: string,
+  deliver: (event: OutboxEvent) => Promise<void>,
+  limit = 25, maxAttempts = 8,
+): Promise<OutboxDispatchResult> {
+  if (!Number.isSafeInteger(maxAttempts) || maxAttempts < 1 || maxAttempts > 32) {
+    throw new DomainError('INVALID_OUTBOX_RETRY', 'Maximum attempts must be 1–32');
+  }
+  const events = await claimOutboxEvents(pool, tenantId, workerId, limit);
+  let delivered = 0;
+  let retried = 0;
+  let deadLettered = 0;
+  for (const event of events) {
+    try {
+      await deliver(event);
+    } catch {
+      const updated = event.attempts >= maxAttempts
+        ? await deadLetterOutboxEvent(pool, tenantId, event.id, workerId, 'DELIVERY_FAILED')
+        : await releaseOutboxEvent(pool, tenantId, event.id, workerId, Math.min(3600, 2 ** event.attempts), 'DELIVERY_FAILED');
+      if (!updated) throw new DomainError('OUTBOX_LEASE_LOST', 'Outbox lease expired before failure was recorded');
+      if (event.attempts >= maxAttempts) deadLettered++;
+      else retried++;
+      continue;
+    }
+    if (!await markOutboxDelivered(pool, tenantId, event.id, workerId)) {
+      throw new DomainError('OUTBOX_LEASE_LOST', 'Outbox lease expired after delivery');
+    }
+    delivered++;
+  }
+  return { delivered, retried, deadLettered };
 }

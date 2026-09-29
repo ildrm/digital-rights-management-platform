@@ -167,10 +167,10 @@ export class PostgresLicenseService {
       const digest = createHash('sha256').update(canonicalJson(license.claims)).digest();
       await client.query(
         `INSERT INTO drm.licenses
-         (tenant_id, id, entitlement_id, device_id, policy_id, policy_version, issued_at, expires_at, claims_sha256)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+         (tenant_id, id, entitlement_id, device_id, policy_id, policy_version, issued_at, expires_at, claims_sha256, rendition_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
         [request.tenantId, license.claims.licenseId, row.id, request.deviceId, row.policy_id, row.policy_version,
-          license.claims.issuedAt, license.claims.expiresAt, digest],
+          license.claims.issuedAt, license.claims.expiresAt, digest, request.renditionId],
       );
       await client.query(
         `INSERT INTO drm.audit_events (tenant_id, id, actor_id, event_type, details)

@@ -105,9 +105,25 @@ export class OpenBaoTransitClient {
     if (length && Number(length) > 16_384) throw new DomainError('BAO_RESPONSE_INVALID', 'OpenBao response is too large');
     let data: unknown;
     try {
-      const body = await response.text();
-      if (body.length > 16_384) throw new Error('Response too large');
-      data = JSON.parse(body);
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error('Missing response body');
+      const chunks: Buffer[] = [];
+      let size = 0;
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          size += value.length;
+          if (size > 16_384) {
+            await reader.cancel().catch(() => undefined);
+            throw new Error('Response too large');
+          }
+          chunks.push(Buffer.from(value));
+        }
+      } finally {
+        reader.releaseLock();
+      }
+      data = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks)));
     } catch {
       throw new DomainError('BAO_RESPONSE_INVALID', 'OpenBao returned malformed JSON');
     }

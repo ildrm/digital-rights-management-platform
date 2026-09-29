@@ -3,7 +3,7 @@ import { S3Client } from '@aws-sdk/client-s3';
 import pg from 'pg';
 import { S3CompatiblePackageStore } from '@drm/aws-s3';
 import { OpenBaoKeyWrapper, OpenBaoLicenseSigner, OpenBaoTransitClient, type TenantTransitKeyRing } from '@drm/openbao';
-import { PostgresAssetPublisher, PostgresLicenseService } from '@drm/postgres';
+import { PostgresAssetPublisher, PostgresLicenseService, PostgresPackageReader } from '@drm/postgres';
 import { createPostgresLicenseApi, OidcAccessTokenVerifier } from './index.ts';
 
 function required(name: string): string {
@@ -65,6 +65,7 @@ async function main(): Promise<void> {
   const objectEndpoint = process.env.OBJECT_STORE_ENDPOINT;
   if (Boolean(bucket) !== Boolean(objectEndpoint)) throw new Error('PACKAGE_BUCKET and OBJECT_STORE_ENDPOINT must both be set');
   let s3: S3Client | undefined;
+  let store: S3CompatiblePackageStore | undefined;
   if (bucket && objectEndpoint) {
     const endpoint = new URL(objectEndpoint);
     if (endpoint.protocol !== 'https:' || endpoint.username || endpoint.password || endpoint.search || endpoint.hash || endpoint.pathname !== '/') {
@@ -78,20 +79,31 @@ async function main(): Promise<void> {
       },
       maxAttempts: 3,
     });
+    store = new S3CompatiblePackageStore(s3, bucket);
   }
-  const publishing = s3 && bucket ? {
+  const publishing = store ? {
     auth: new OidcAccessTokenVerifier({
       issuer: required('OIDC_ISSUER'), audience: required('OIDC_AUDIENCE'),
       jwksUrl: required('OIDC_JWKS_URL'), requiredScope: 'drm:publish',
     }),
-    publisher: new PostgresAssetPublisher(pool, new S3CompatiblePackageStore(s3, bucket), wrapper, signer),
+    publisher: new PostgresAssetPublisher(pool, store, wrapper, signer),
   } : undefined;
-  const server = createPostgresLicenseApi(pool, auth, licenses, publishing);
+  const server = createPostgresLicenseApi(pool, auth, licenses, publishing,
+    store ? new PostgresPackageReader(pool, store) : undefined);
   try {
     await pool.query('SELECT 1');
     await new Promise<void>((resolve, reject) => {
-      server.once('error', reject);
-      server.listen(port, host, resolve);
+      const onError = (error: Error) => {
+        server.off('listening', onListening);
+        reject(error);
+      };
+      const onListening = () => {
+        server.off('error', onError);
+        resolve();
+      };
+      server.once('error', onError);
+      server.once('listening', onListening);
+      server.listen(port, host);
     });
     process.stdout.write(JSON.stringify({ event: 'api.started', host, port }) + '\n');
   } catch (error) {

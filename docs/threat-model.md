@@ -14,12 +14,12 @@ Protected assets include source files, per-rendition content keys, policy versio
 | Token forgery or tenant injection | OIDC signature, issuer, audience, age, scope, and tenant validation; request body rejects tenant/user fields | Live IdP configuration and negative integration tests |
 | License-signing abuse | PostgreSQL per-user rate windows and three pending challenges per device | Gateway IP/anonymous limits, bot and anomaly controls, provider quota monitoring |
 | License alteration | Ed25519 signature over a domain-separated digest of claims and device binding; verifier checks pinned OpenBao key version; live Transit interoperability test | Signing-key rotation, revocation distribution, client verifier |
-| Clock rollback | Signed expiry and server time on issuance | Trusted offline time ledger and rollback detection in native clients |
+| Clock rollback | Signed expiry, server time on issuance, explicit online/offline state, and `offlineUntil` enforcement in the library | Trusted offline time ledger and rollback detection in native clients; caller-supplied connectivity is not a security boundary in an untrusted client |
 | Content tampering or cross-asset substitution | Signed manifest through asynchronous signer, AEAD associated data, ciphertext hash, licensed chunk opening; live OpenBao/SeaweedFS round-trip | Parser fuzzing and streaming |
 | Key theft | OpenBao Transit wrapping with tenant-derived key context and authenticated asset metadata; no embedded production root | TLS, scoped token, durable seal/unseal, audit, rotation and incident drills |
 | DRM token replay or sharing | Axinom message scoped to one key and 30 seconds after verifying a signed online license | Live provider replay controls, CDM/device binding and robustness verification |
 | Screen capture and memory extraction | No claim of impossibility | Certified DRM/TEE where available, watermarking, remote execution |
-| Malicious uploads | Separate `drm:publish` scope, 8 MiB decoded limit, strict policy compilation, encrypted object write | MIME inspection, sandboxed processing, malware scanning and abuse controls |
+| Malicious uploads | Separate `drm:publish` scope, per-user quota charged before body parsing, 8 MiB decoded limit, strict policy compilation, encrypted object write | MIME inspection, sandboxed processing, malware scanning, edge limits and abuse controls |
 | Concurrent seat abuse | Database issuance locks the entitlement and counts other active devices | Dedicated session lease service and wider concurrency policies |
 | Privileged operator abuse | No operator API currently exposed | Separation of duties, step-up authentication, audit, approval workflow |
 

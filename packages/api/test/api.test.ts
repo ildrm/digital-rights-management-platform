@@ -10,6 +10,7 @@ const userId = randomUUID();
 const deviceId = randomUUID();
 const entitlementId = randomUUID();
 const renditionId = randomUUID();
+const assetId = randomUUID();
 const issuer = 'https://identity.example.test/';
 const audience = 'https://rights.example.test/api';
 
@@ -34,10 +35,14 @@ test('OIDC verifier rejects wrong audience, missing scope, and untrusted tenant 
   const unavailable = new OidcAccessTokenVerifier({ issuer, audience, jwksUrl: `${issuer}jwks`, requiredScope: 'drm:license' },
     async () => { throw new joseErrors.JWKSTimeout(); });
   await assert.rejects(unavailable.verify(`Bearer ${valid}`), { code: 'AUTH_UNAVAILABLE' });
+  const networkFailure = new OidcAccessTokenVerifier({ issuer, audience, jwksUrl: `${issuer}jwks`, requiredScope: 'drm:license' },
+    async () => { throw new TypeError('fetch failed'); });
+  await assert.rejects(networkFailure.verify(`Bearer ${valid}`), { code: 'AUTH_UNAVAILABLE' });
 });
 
 test('HTTP API binds issuance to verified identity and rejects tenant injection', { skip: process.env.API_TEST !== '1' }, async () => {
   const calls: string[] = [];
+  let providerUnavailable = false;
   const license = { claims: { licenseId: randomUUID() }, signature: 'test', algorithm: 'Ed25519' } as unknown as SignedLicense;
   const server = createLicenseApiServer({
     auth: {
@@ -77,6 +82,7 @@ test('HTTP API binds issuance to verified identity and rejects tenant injection'
     },
     licenses: {
       async issue(input) {
+        if (providerUnavailable) throw new DomainError('BAO_DENIED', 'Backend Transit access denied');
         assert.equal(input.tenantId, tenantId);
         assert.equal(input.authenticatedUserId, userId);
         assert.equal(input.deviceId, deviceId);
@@ -99,6 +105,14 @@ test('HTTP API binds issuance to verified identity and rejects tenant injection'
         calls.push('publish');
         return { assetId: randomUUID(), policyId: randomUUID(), renditionId: randomUUID(),
           version: 1, objectKey: 'encrypted-object', packageSha256: 'a'.repeat(64) };
+      },
+    },
+    packageReader: {
+      async read(input) {
+        assert.deepEqual(input, { tenantId, authenticatedUserId: userId, assetId,
+          renditionId, licenseId: license.claims.licenseId });
+        calls.push('package-read');
+        return Buffer.from('{"ciphertext":"test"}');
       },
     },
   });
@@ -136,6 +150,13 @@ test('HTTP API binds issuance to verified identity and rejects tenant injection'
     assert.equal(licenseResponse.status, 201);
     assert.equal((await licenseResponse.json()).license.claims.licenseId, license.claims.licenseId);
     assert.deepEqual(calls.slice(-4), ['auth', 'user', 'license-issue', 'license']);
+    providerUnavailable = true;
+    const providerFailure = await post('/v1/licenses', {
+      entitlementId, deviceId, renditionId, action: 'read',
+      proof: { challenge: 'challenge-value-1234567890', signature: 'signature' }, requestedSeconds: 60,
+    });
+    assert.equal(providerFailure.status, 503);
+    providerUnavailable = false;
     const revokeResponse = await fetch(`${url}/v1/devices/${deviceId}`, { method: 'DELETE', headers: { Authorization: 'Bearer valid' } });
     assert.equal(revokeResponse.status, 204);
     assert.deepEqual(calls.slice(-3), ['auth', 'user', 'revoke']);
@@ -143,10 +164,23 @@ test('HTTP API binds issuance to verified identity and rejects tenant injection'
       mimeType: 'application/pdf', policy: { permissions: ['read'] } };
     assert.equal((await post('/v1/assets', publishBody)).status, 401);
     assert.equal((await post('/v1/assets', { ...publishBody, tenantId }, 'Bearer creator')).status, 400);
+    assert.deepEqual(calls.slice(-3), ['publish-auth', 'user', 'asset-publish']);
     const publishResponse = await post('/v1/assets', publishBody, 'Bearer creator');
     assert.equal(publishResponse.status, 201);
     assert.equal((await publishResponse.json()).asset.version, 1);
     assert.deepEqual(calls.slice(-4), ['publish-auth', 'user', 'asset-publish', 'publish']);
+    const packagePath = `/v1/assets/${assetId}/renditions/${renditionId}/package`;
+    const deniedPackage = await fetch(`${url}${packagePath}`, { headers: { Authorization: 'Bearer invalid',
+      'X-DRM-License-ID': license.claims.licenseId } });
+    assert.equal(deniedPackage.status, 401);
+    const missingLicense = await fetch(`${url}${packagePath}`, { headers: { Authorization: 'Bearer valid' } });
+    assert.equal(missingLicense.status, 400);
+    const packageResponse = await fetch(`${url}${packagePath}`, { headers: { Authorization: 'Bearer valid',
+      'X-DRM-License-ID': license.claims.licenseId } });
+    assert.equal(packageResponse.status, 200);
+    assert.equal(packageResponse.headers.get('cache-control'), 'no-store');
+    assert.equal(await packageResponse.text(), '{"ciphertext":"test"}');
+    assert.deepEqual(calls.slice(-4), ['auth', 'user', 'asset-fetch', 'package-read']);
   } finally {
     server.closeAllConnections();
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));

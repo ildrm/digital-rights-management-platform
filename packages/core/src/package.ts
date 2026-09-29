@@ -62,7 +62,17 @@ function manifestSigningMessage(manifest: PackageManifest): Buffer {
 }
 
 function validateIdentity(identity: PackageIdentity): void {
+  requireValue(identity !== null && typeof identity === 'object' && !Array.isArray(identity) &&
+    Object.keys(identity).length === 5 &&
+    ['tenantId', 'assetId', 'assetVersion', 'renditionId', 'mimeType'].every((key) => Object.hasOwn(identity, key)),
+  'INVALID_IDENTITY', 'Package identity fields are incomplete or unknown');
   for (const value of Object.values(identity)) requireValue(typeof value === 'string' && value.length > 0 && value.length <= 256, 'INVALID_IDENTITY', 'Package identity fields must be 1–256 characters');
+}
+
+function canonicalBase64Url(value: unknown, bytes: number): boolean {
+  return typeof value === 'string' && value.length <= Math.ceil(bytes * 4 / 3) + 2 &&
+    /^[A-Za-z0-9_-]+$/.test(value) && Buffer.from(value, 'base64url').length === bytes &&
+    Buffer.from(value, 'base64url').toString('base64url') === value;
 }
 
 export async function createSecurePackage(content: Buffer, identity: PackageIdentity, keys: KeyWrapper, signer: LicenseSigner, chunkSize = MAX_CHUNK_BYTES): Promise<SecurePackage> {
@@ -103,22 +113,36 @@ export async function createSecurePackage(content: Buffer, identity: PackageIden
 }
 
 function validateManifest(manifest: PackageManifest, count: number): void {
+  requireValue(manifest !== null && typeof manifest === 'object' && !Array.isArray(manifest) &&
+    Object.keys(manifest).length === 7 &&
+    ['formatVersion', 'signingKeyId', 'identity', 'totalBytes', 'chunkSize', 'wrappedKey', 'chunks'].every((key) => Object.hasOwn(manifest, key)),
+  'INVALID_PACKAGE', 'Package manifest fields are incomplete or unknown');
   requireValue(manifest.formatVersion === 1, 'INVALID_PACKAGE', 'Unsupported package version');
   requireValue(typeof manifest.signingKeyId === 'string' && manifest.signingKeyId.length > 0 && manifest.signingKeyId.length <= 512, 'INVALID_PACKAGE', 'Invalid signing key reference');
   validateIdentity(manifest.identity);
-  requireValue(manifest.wrappedKey !== null && typeof manifest.wrappedKey === 'object', 'INVALID_PACKAGE', 'Wrapped key required');
+  requireValue(manifest.wrappedKey !== null && typeof manifest.wrappedKey === 'object' && !Array.isArray(manifest.wrappedKey) &&
+    Object.keys(manifest.wrappedKey).length === 4 &&
+    ['provider', 'keyVersion', 'keyReference', 'ciphertext'].every((key) => Object.hasOwn(manifest.wrappedKey, key)),
+  'INVALID_PACKAGE', 'Wrapped key fields are incomplete or unknown');
   requireValue(typeof manifest.wrappedKey.provider === 'string' && manifest.wrappedKey.provider.length > 0 && manifest.wrappedKey.provider.length <= 128, 'INVALID_PACKAGE', 'Invalid key provider');
   requireValue(typeof manifest.wrappedKey.keyVersion === 'string' && manifest.wrappedKey.keyVersion.length > 0 && manifest.wrappedKey.keyVersion.length <= 128, 'INVALID_PACKAGE', 'Invalid key version');
   requireValue(typeof manifest.wrappedKey.keyReference === 'string' && manifest.wrappedKey.keyReference.length > 0 && manifest.wrappedKey.keyReference.length <= 512, 'INVALID_PACKAGE', 'Invalid key reference');
   requireValue(typeof manifest.wrappedKey.ciphertext === 'string' && manifest.wrappedKey.ciphertext.length > 0 && manifest.wrappedKey.ciphertext.length <= 8192, 'INVALID_PACKAGE', 'Invalid wrapped key');
   requireValue(Number.isSafeInteger(manifest.totalBytes) && manifest.totalBytes > 0 && manifest.totalBytes <= MAX_CONTENT_BYTES, 'INVALID_PACKAGE', 'Invalid total length');
   requireValue(Number.isSafeInteger(manifest.chunkSize) && manifest.chunkSize > 0 && manifest.chunkSize <= MAX_CHUNK_BYTES, 'INVALID_PACKAGE', 'Invalid chunk size');
-  requireValue(count <= MAX_CHUNKS && manifest.chunks.length === count && count === Math.ceil(manifest.totalBytes / manifest.chunkSize), 'INVALID_PACKAGE', 'Invalid chunk count');
+  requireValue(Number.isSafeInteger(count) && count > 0 && count <= MAX_CHUNKS && Array.isArray(manifest.chunks) &&
+    manifest.chunks.length === count && count === Math.ceil(manifest.totalBytes / manifest.chunkSize),
+  'INVALID_PACKAGE', 'Invalid chunk count');
   let sum = 0;
   for (let index = 0; index < count; index++) {
     const chunk = manifest.chunks[index];
-    requireValue(chunk !== undefined && chunk.index === index && Number.isSafeInteger(chunk.length) && chunk.length > 0 && chunk.length <= manifest.chunkSize, 'INVALID_PACKAGE', 'Invalid chunk metadata');
-    requireValue(Buffer.from(chunk.nonce, 'base64url').length === 12 && Buffer.from(chunk.tag, 'base64url').length === 16 && /^[a-f0-9]{64}$/.test(chunk.ciphertextSha256), 'INVALID_PACKAGE', 'Invalid cryptographic metadata');
+    requireValue(chunk !== null && typeof chunk === 'object' && !Array.isArray(chunk) &&
+      Object.keys(chunk).length === 5 && ['index', 'length', 'nonce', 'tag', 'ciphertextSha256'].every((key) => Object.hasOwn(chunk, key)) &&
+      chunk.index === index && Number.isSafeInteger(chunk.length) && chunk.length > 0 && chunk.length <= manifest.chunkSize,
+    'INVALID_PACKAGE', 'Invalid chunk metadata');
+    requireValue(canonicalBase64Url(chunk.nonce, 12) && canonicalBase64Url(chunk.tag, 16) &&
+      typeof chunk.ciphertextSha256 === 'string' && /^[a-f0-9]{64}$/.test(chunk.ciphertextSha256),
+    'INVALID_PACKAGE', 'Invalid cryptographic metadata');
     sum += chunk.length;
   }
   requireValue(sum === manifest.totalBytes, 'INVALID_PACKAGE', 'Package length mismatch');
@@ -128,9 +152,20 @@ export async function openLicensedChunk(
   pkg: SecurePackage, index: number, expectedIdentity: PackageIdentity,
   keys: KeyWrapper, manifestSigningKey: TrustedSigningKey, license: SignedLicense,
   licenseSigningKey: TrustedSigningKey, expectedDeviceId: string, trustedNow: string, action: Action,
+  online: boolean,
 ): Promise<Buffer> {
   requireValue(verifyLicense(license, licenseSigningKey, expectedDeviceId, trustedNow), 'LICENSE_INVALID', 'License is invalid or expired');
-  requireValue(pkg !== null && typeof pkg === 'object' && pkg.manifest !== null && typeof pkg.manifest === 'object' && pkg.manifest.wrappedKey !== null && typeof pkg.manifest.wrappedKey === 'object', 'INVALID_PACKAGE', 'Package manifest and wrapped key required');
+  requireValue(typeof online === 'boolean', 'LICENSE_INVALID', 'Trusted connectivity state is required');
+  if (!online) {
+    const offlineUntil = license.claims.offlineUntil === null ? NaN : Date.parse(license.claims.offlineUntil);
+    requireValue(Number.isFinite(offlineUntil) && Date.parse(trustedNow) < offlineUntil,
+      'OFFLINE_ACCESS_DENIED', 'Offline license window has ended');
+  }
+  requireValue(pkg !== null && typeof pkg === 'object' && !Array.isArray(pkg) &&
+    Object.keys(pkg).length === 3 && ['manifest', 'manifestSignature', 'ciphertextChunks'].every((key) => Object.hasOwn(pkg, key)) &&
+    Array.isArray(pkg.ciphertextChunks) && pkg.ciphertextChunks.length <= MAX_CHUNKS,
+  'INVALID_PACKAGE', 'Package fields are incomplete or unknown');
+  validateManifest(pkg.manifest, pkg.ciphertextChunks.length);
   requireValue(license.claims.tenantId === expectedIdentity.tenantId && license.claims.assetId === expectedIdentity.assetId &&
     license.claims.assetVersion === expectedIdentity.assetVersion && license.claims.renditionId === expectedIdentity.renditionId &&
     license.claims.rights.includes(action) && license.claims.keyReference === pkg.manifest.wrappedKey.keyReference,
@@ -139,15 +174,18 @@ export async function openLicensedChunk(
   requireValue(pkg.manifest.signingKeyId === manifestSigningKey.keyId && manifestSigningKey.publicKey.type === 'public' && manifestSigningKey.publicKey.asymmetricKeyType === 'ed25519', 'INVALID_SIGNING_KEY', 'Trusted Ed25519 signing key required');
   const signedBytes = Buffer.from(canonicalJson(pkg.manifest));
   requireValue(signedBytes.length <= MAX_MANIFEST_BYTES, 'INVALID_PACKAGE', 'Manifest too large');
-  requireValue(verify(null, manifestSigningMessage(pkg.manifest), manifestSigningKey.publicKey, Buffer.from(pkg.manifestSignature, 'base64url')), 'INVALID_SIGNATURE', 'Package manifest signature invalid');
-  validateManifest(pkg.manifest, pkg.ciphertextChunks.length);
+  requireValue(canonicalBase64Url(pkg.manifestSignature, 64) &&
+    verify(null, manifestSigningMessage(pkg.manifest), manifestSigningKey.publicKey, Buffer.from(pkg.manifestSignature, 'base64url')),
+  'INVALID_SIGNATURE', 'Package manifest signature invalid');
   requireValue(canonicalJson(pkg.manifest.identity) === canonicalJson(expectedIdentity), 'IDENTITY_MISMATCH', 'Package identity mismatch');
   const metadata = pkg.manifest.chunks[index];
   const encoded = pkg.ciphertextChunks[index];
   if (metadata === undefined || encoded === undefined) throw new DomainError('INVALID_CHUNK', 'Chunk missing');
-  requireValue(encoded.length <= Math.ceil(MAX_CHUNK_BYTES * 4 / 3) + 4, 'INVALID_CHUNK', 'Encoded chunk too large');
+  requireValue(typeof encoded === 'string' && encoded.length <= Math.ceil(MAX_CHUNK_BYTES * 4 / 3) + 4,
+    'INVALID_CHUNK', 'Encoded chunk is invalid or too large');
   const ciphertext = Buffer.from(encoded, 'base64url');
-  requireValue(ciphertext.length === metadata.length, 'INVALID_CHUNK', 'Chunk length mismatch');
+  requireValue(ciphertext.length === metadata.length && ciphertext.toString('base64url') === encoded,
+    'INVALID_CHUNK', 'Chunk length or encoding mismatch');
   requireValue(createHash('sha256').update(ciphertext).digest('hex') === metadata.ciphertextSha256, 'INVALID_CHUNK', 'Chunk checksum mismatch');
   const dataKey = Buffer.from(await keys.unwrap(pkg.manifest.wrappedKey, pkg.manifest.identity));
   try {

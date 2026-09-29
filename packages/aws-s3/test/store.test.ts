@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createHash } from 'node:crypto';
-import { DeleteObjectCommand, PutObjectCommand, type S3Client } from '@aws-sdk/client-s3';
+import { Readable } from 'node:stream';
+import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, type S3Client } from '@aws-sdk/client-s3';
 import type { SecurePackage } from '@drm/core';
 import { S3CompatiblePackageStore } from '../src/index.ts';
 
@@ -42,6 +43,23 @@ test('S3 package writes use checksum, conditional creation, KMS encryption and n
   await store.delete(key);
   assert.deepEqual(commands, ['put', 'delete']);
   await assert.rejects(store.put(key.replace(tenantId, assetId), pkg), { code: 'INVALID_STORAGE_KEY' });
+});
+
+test('S3 package reads reject altered and oversized ciphertext', async () => {
+  const original = Buffer.from('{"encrypted":true}');
+  const digest = createHash('sha256').update(original).digest('hex');
+  let body = original;
+  const fake = { async send(command: unknown) {
+    assert.ok(command instanceof GetObjectCommand);
+    assert.equal(command.input.Key, key);
+    return { ContentLength: original.length, Body: Readable.from([body]) };
+  } } as unknown as S3Client;
+  const store = new S3CompatiblePackageStore(fake, 'drm-private-packages');
+  assert.deepEqual(await store.get(key, digest, original.length), original);
+  body = Buffer.from('{"encrypted":fals}');
+  await assert.rejects(store.get(key, digest, original.length), { code: 'INVALID_STORAGE_CONTENT' });
+  body = Buffer.concat([original, Buffer.from('extra')]);
+  await assert.rejects(store.get(key, digest, original.length), { code: 'INVALID_STORAGE_CONTENT' });
 });
 
 test('S3-compatible self-hosted object storage accepts client-encrypted packages without AWS KMS', async () => {

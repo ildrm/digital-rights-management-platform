@@ -3,7 +3,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { TextDecoder } from 'node:util';
 import type { Pool } from 'pg';
 import { ACTIONS, DomainError, type Action, type SignedLicense } from '@drm/core';
-import { issueDeviceChallenge, issueDeviceEnrollmentChallenge, registerDevice, revokeOwnedDevice, type DatabaseLicenseRequest, type PostgresAssetPublisher, type PostgresLicenseService, type PublishAssetInput, type RegisterDeviceInput, withTenantTransaction } from '@drm/postgres';
+import { issueDeviceChallenge, issueDeviceEnrollmentChallenge, registerDevice, revokeOwnedDevice, type DatabaseLicenseRequest, type PostgresAssetPublisher, type PostgresLicenseService, type PostgresPackageReader, type PublishAssetInput, type RegisterDeviceInput, withTenantTransaction } from '@drm/postgres';
 import type { AccessTokenVerifier } from './auth.ts';
 import { consumeUserRateLimit, type LimitedOperation } from './rate-limit.ts';
 
@@ -23,6 +23,7 @@ export interface LicenseApiDependencies {
   readonly licenses: Pick<PostgresLicenseService, 'issue'>;
   readonly publishAuth?: AccessTokenVerifier;
   readonly publisher?: Pick<PostgresAssetPublisher, 'publish'>;
+  readonly packageReader?: Pick<PostgresPackageReader, 'read'>;
   readonly ready?: () => Promise<void>;
   readonly logError?: (event: { requestId: string; errorName: string }) => void;
 }
@@ -30,6 +31,7 @@ export interface LicenseApiDependencies {
 export function createPostgresLicenseApi(
   pool: Pool, auth: AccessTokenVerifier, licenses: PostgresLicenseService,
   publishing?: { auth: AccessTokenVerifier; publisher: PostgresAssetPublisher },
+  packageReader?: PostgresPackageReader,
 ): Server {
   return createLicenseApiServer({
     auth,
@@ -45,13 +47,14 @@ export function createPostgresLicenseApi(
       });
     },
     consumeRate: (tenantId, userId, operation) => consumeUserRateLimit(pool, tenantId, userId, operation,
-      operation === 'license-issue' ? 30 : operation === 'asset-publish' ? 3 : 10),
+      operation === 'license-issue' ? 30 : operation === 'asset-publish' ? 3 : operation === 'asset-fetch' ? 60 : 10),
     issueChallenge: (tenantId, userId, deviceId) => issueDeviceChallenge(pool, tenantId, userId, deviceId),
     issueEnrollmentChallenge: (tenantId, userId, publicKeyPem, deviceClass) => issueDeviceEnrollmentChallenge(pool, tenantId, userId, publicKeyPem, deviceClass),
     registerDevice: (input) => registerDevice(pool, input),
     revokeDevice: (tenantId, userId, deviceId) => revokeOwnedDevice(pool, tenantId, userId, deviceId),
     licenses,
     ...(publishing ? { publishAuth: publishing.auth, publisher: publishing.publisher } : {}),
+    ...(packageReader ? { packageReader } : {}),
     ready: async () => { await pool.query('SELECT 1'); },
   });
 }
@@ -117,6 +120,16 @@ function uuid(value: unknown): string {
   return value;
 }
 
+function oneUuidHeader(request: IncomingMessage, name: string): string {
+  let count = 0;
+  for (let index = 0; index < request.rawHeaders.length; index += 2) {
+    if (request.rawHeaders[index]?.toLowerCase() === name) count++;
+  }
+  const value = request.headers[name];
+  if (count !== 1 || typeof value !== 'string') throw new DomainError('INVALID_REQUEST', `One ${name} header required`);
+  return uuid(value);
+}
+
 function challengeBody(body: Record<string, unknown>): string {
   exactFields(body, ['deviceId']);
   return uuid(body.deviceId);
@@ -178,10 +191,13 @@ function sendJson(response: ServerResponse, status: number, body: Record<string,
 function errorStatus(error: DomainError): number {
   if (error.code === 'UNAUTHENTICATED') return 401;
   if (error.code === 'AUTH_UNAVAILABLE') return 503;
+  if (error.code.startsWith('BAO_') || error.code.startsWith('KMS_') ||
+      error.code === 'INVALID_BAO_KEY' || error.code === 'INVALID_BAO_CONFIG' ||
+      error.code.startsWith('STORAGE_') || error.code.startsWith('INVALID_STORAGE_') ||
+      error.code === 'INVALID_SIGNATURE') return 503;
   if (error.code === 'RATE_LIMITED' || error.code === 'CHALLENGE_LIMIT') return 429;
   if (error.code === 'INVALID_REQUEST') return 400;
   if (error.code.startsWith('INVALID_')) return 400;
-  if (error.code.startsWith('KMS_') || error.code === 'BAO_UNAVAILABLE' || error.code === 'BAO_KEY_DISABLED') return 503;
   return 403;
 }
 
@@ -204,17 +220,36 @@ export function createLicenseApiServer(dependencies: LicenseApiDependencies): Se
         return;
       }
       const revokeMatch = request.method === 'DELETE' ? /^\/v1\/devices\/([^/]+)$/.exec(url.pathname) : null;
+      const packageMatch = request.method === 'GET' && dependencies.packageReader
+        ? /^\/v1\/assets\/([^/]+)\/renditions\/([^/]+)\/package$/.exec(url.pathname) : null;
       const postRoute = request.method === 'POST' && [
         '/v1/device-enrollment-challenges', '/v1/devices', '/v1/device-challenges', '/v1/licenses',
       ].includes(url.pathname);
       const publishRoute = request.method === 'POST' && url.pathname === '/v1/assets' &&
         dependencies.publishAuth !== undefined && dependencies.publisher !== undefined;
-      if (url.search || (!postRoute && !revokeMatch && !publishRoute)) {
+      if (url.search || (!postRoute && !revokeMatch && !publishRoute && !packageMatch)) {
         sendJson(response, 404, { error: 'NOT_FOUND' }, requestId);
         return;
       }
       const principal = await (publishRoute ? dependencies.publishAuth! : dependencies.auth).verify(oneAuthorizationHeader(request));
       const userId = await dependencies.resolveUser(principal.tenantId, principal.externalSubject);
+      if (publishRoute) await dependencies.consumeRate(principal.tenantId, userId, 'asset-publish');
+      if (packageMatch) {
+        await dependencies.consumeRate(principal.tenantId, userId, 'asset-fetch');
+        const bytes = await dependencies.packageReader!.read({
+          tenantId: principal.tenantId, authenticatedUserId: userId,
+          assetId: uuid(packageMatch[1]), renditionId: uuid(packageMatch[2]),
+          licenseId: oneUuidHeader(request, 'x-drm-license-id'),
+        });
+        response.writeHead(200, {
+          'Content-Type': 'application/vnd.drm.secure-package+json',
+          'Content-Length': bytes.length,
+          'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff',
+          'X-Request-Id': requestId,
+        });
+        response.end(bytes);
+        return;
+      }
       if (revokeMatch) {
         const deviceId = uuid(revokeMatch[1]);
         await dependencies.revokeDevice(principal.tenantId, userId, deviceId);
@@ -225,9 +260,12 @@ export function createLicenseApiServer(dependencies: LicenseApiDependencies): Se
       const body = await readJson(request, publishRoute ? MAX_PUBLISH_BODY_BYTES : MAX_BODY_BYTES);
       if (publishRoute) {
         const input = publishingBody(body);
-        await dependencies.consumeRate(principal.tenantId, userId, 'asset-publish');
-        const published = await dependencies.publisher!.publish({ tenantId: principal.tenantId, ownerUserId: userId, ...input });
-        sendJson(response, 201, { asset: published }, requestId);
+        try {
+          const published = await dependencies.publisher!.publish({ tenantId: principal.tenantId, ownerUserId: userId, ...input });
+          sendJson(response, 201, { asset: published }, requestId);
+        } finally {
+          input.content.fill(0);
+        }
         return;
       }
       if (url.pathname === '/v1/device-enrollment-challenges') {

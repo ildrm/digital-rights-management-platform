@@ -75,4 +75,12 @@ test('OpenBao Transit refuses non-TLS external endpoints and mismatched signing 
   })) as typeof fetch;
   const signer = new OpenBaoLicenseSigner(new OpenBaoTransitClient('https://bao.test/', 'token', fakeFetch), 'signer', 1);
   await assert.rejects(signer.signEd25519(Buffer.alloc(32)), { code: 'BAO_SIGNATURE_INVALID' });
+  const oversized = (async () => new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(Buffer.alloc(17_000, 65));
+      controller.close();
+    },
+  }))) as typeof fetch;
+  const bounded = new OpenBaoTransitClient('https://bao.test/', 'token', oversized);
+  await assert.rejects(bounded.readKey('signer'), { code: 'BAO_RESPONSE_INVALID' });
 });

@@ -1,7 +1,7 @@
 import { createHash, randomUUID, verify, type KeyObject } from 'node:crypto';
 import { DomainError, requireValue } from './errors.ts';
 import { evaluateAccess, type AccessRequest } from './entitlement.ts';
-import type { Action } from './model.ts';
+import { ACTIONS, type Action } from './model.ts';
 import { canonicalJson } from './canonical.ts';
 
 export interface DeviceProof {
@@ -53,6 +53,40 @@ export interface SignedLicense {
 
 function signingMessage(claims: LicenseClaims): Buffer {
   return createHash('sha256').update('drm-license-v1\0').update(canonicalJson(claims)).digest();
+}
+
+const CLAIM_KEYS: readonly (keyof LicenseClaims)[] = [
+  'formatVersion', 'licenseId', 'tenantId', 'assetId', 'assetVersion', 'renditionId',
+  'subjectId', 'deviceId', 'rights', 'issuedAt', 'notBefore', 'expiresAt',
+  'offlineUntil', 'policyId', 'policyVersion', 'keyReference', 'nonce', 'issuer', 'signingKeyId',
+];
+
+function instant(value: unknown): number | undefined {
+  if (typeof value !== 'string') return undefined;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) && new Date(parsed).toISOString() === value ? parsed : undefined;
+}
+
+function validClaims(claims: LicenseClaims): boolean {
+  if (!claims || typeof claims !== 'object' || Array.isArray(claims) ||
+      Object.keys(claims).length !== CLAIM_KEYS.length || !CLAIM_KEYS.every((key) => Object.hasOwn(claims, key)) ||
+      claims.formatVersion !== 1 || !Number.isSafeInteger(claims.policyVersion) || claims.policyVersion < 1 ||
+      !Array.isArray(claims.rights) || claims.rights.length < 1 || claims.rights.length > ACTIONS.length ||
+      !claims.rights.every((right) => ACTIONS.includes(right)) || new Set(claims.rights).size !== claims.rights.length) return false;
+  for (const key of ['licenseId', 'tenantId', 'assetId', 'assetVersion', 'renditionId', 'subjectId',
+    'deviceId', 'policyId', 'keyReference', 'nonce', 'issuer', 'signingKeyId'] as const) {
+    const value = claims[key];
+    if (typeof value !== 'string' || value.length < 1 || value.length > 512) return false;
+  }
+  const issued = instant(claims.issuedAt);
+  const start = instant(claims.notBefore);
+  const end = instant(claims.expiresAt);
+  if (issued === undefined || start === undefined || end === undefined || issued > start || start >= end) return false;
+  if (claims.offlineUntil !== null) {
+    const offlineEnd = instant(claims.offlineUntil);
+    if (offlineEnd === undefined || offlineEnd <= start || offlineEnd > end) return false;
+  }
+  return true;
 }
 
 export interface IssueLicenseInput extends AccessRequest {
@@ -112,10 +146,18 @@ export class LicenseIssuer {
 }
 
 export function verifyLicense(license: SignedLicense, signingKey: TrustedSigningKey, expectedDeviceId: string, trustedNow: string): boolean {
-  if (license.algorithm !== 'Ed25519' || license.claims.formatVersion !== 1) return false;
-  if (license.claims.signingKeyId !== signingKey.keyId || signingKey.publicKey.type !== 'public' || signingKey.publicKey.asymmetricKeyType !== 'ed25519') return false;
-  if (license.claims.deviceId !== expectedDeviceId) return false;
-  const now = Date.parse(trustedNow);
-  if (!Number.isFinite(now) || now < Date.parse(license.claims.notBefore) || now >= Date.parse(license.claims.expiresAt)) return false;
-  return verify(null, signingMessage(license.claims), signingKey.publicKey, Buffer.from(license.signature, 'base64url'));
+  if (!license || typeof license !== 'object' || license.algorithm !== 'Ed25519' || !validClaims(license.claims) ||
+      !signingKey || license.claims.signingKeyId !== signingKey.keyId ||
+      signingKey.publicKey?.type !== 'public' || signingKey.publicKey.asymmetricKeyType !== 'ed25519' ||
+      license.claims.deviceId !== expectedDeviceId || typeof license.signature !== 'string' ||
+      !/^[A-Za-z0-9_-]{86}$/.test(license.signature)) return false;
+  const now = instant(trustedNow);
+  if (now === undefined || now < Date.parse(license.claims.notBefore) || now >= Date.parse(license.claims.expiresAt)) return false;
+  const signature = Buffer.from(license.signature, 'base64url');
+  if (signature.length !== 64 || signature.toString('base64url') !== license.signature) return false;
+  try {
+    return verify(null, signingMessage(license.claims), signingKey.publicKey, signature);
+  } catch {
+    return false;
+  }
 }

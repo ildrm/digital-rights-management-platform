@@ -56,7 +56,9 @@ export class OidcAccessTokenVerifier implements AccessTokenVerifier {
       }
       return { tenantId: payload.tenant_id, externalSubject: payload.sub };
     } catch (error) {
-      if (error instanceof joseErrors.JWKSTimeout) throw new DomainError('AUTH_UNAVAILABLE', 'Identity key service is temporarily unavailable');
+      if (error instanceof joseErrors.JWKSTimeout || error instanceof TypeError) {
+        throw new DomainError('AUTH_UNAVAILABLE', 'Identity key service is temporarily unavailable');
+      }
       throw new DomainError('UNAUTHENTICATED', 'Valid bearer access token required');
     }
   }

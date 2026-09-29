@@ -65,16 +65,18 @@ export interface CompiledPolicy {
 }
 
 function timestamp(value: string, name: string): number {
-  const result = Date.parse(value);
+  const result = typeof value === 'string' ? Date.parse(value) : NaN;
   requireValue(Number.isFinite(result) && new Date(result).toISOString() === value, 'INVALID_POLICY', `${name} must be an ISO UTC timestamp`);
   return result;
 }
 
 export function validatePolicy(policy: Policy): void {
-  requireValue(policy !== null && typeof policy === 'object' && policy.constraints !== null && typeof policy.constraints === 'object', 'INVALID_POLICY', 'Policy and constraints required');
+  requireValue(policy !== null && typeof policy === 'object' && !Array.isArray(policy) &&
+    policy.constraints !== null && typeof policy.constraints === 'object' && !Array.isArray(policy.constraints),
+  'INVALID_POLICY', 'Policy and constraints required');
   const policyKeys = ['id', 'version', 'tenantId', 'assetId', 'profile', 'permissions', 'prohibitions', 'duties', 'constraints', 'preventOriginalPossession'];
-  for (const key of Object.keys(policy)) requireValue(policyKeys.includes(key), 'INVALID_POLICY', `Unknown policy field: ${key}`);
-  requireValue(typeof policy.id === 'string' && policy.id.length > 0 && typeof policy.tenantId === 'string' && policy.tenantId.length > 0 && typeof policy.assetId === 'string' && policy.assetId.length > 0, 'INVALID_POLICY', 'Policy identifiers are required');
+  requireValue(Object.keys(policy).length === policyKeys.length && policyKeys.every((key) => Object.hasOwn(policy, key)), 'INVALID_POLICY', 'Policy fields are incomplete or unknown');
+  requireValue([policy.id, policy.tenantId, policy.assetId].every((value) => typeof value === 'string' && value.length > 0 && value.length <= 256), 'INVALID_POLICY', 'Policy identifiers must be 1–256 characters');
   requireValue(Number.isSafeInteger(policy.version) && policy.version > 0, 'INVALID_POLICY', 'Policy version must be positive');
   requireValue(['public', 'controlled', 'protected', 'highSecurity', 'maximum'].includes(policy.profile), 'INVALID_POLICY', 'Unknown protection profile');
   requireValue(typeof policy.preventOriginalPossession === 'boolean', 'INVALID_POLICY', 'Original possession flag required');
@@ -98,10 +100,20 @@ export function validatePolicy(policy: Policy): void {
     const value = policy.constraints[key];
     if (value !== undefined) requireValue(Number.isSafeInteger(value) && value > 0, 'INVALID_POLICY', `${key} must be a positive safe integer`);
   }
-  if (policy.constraints.territories !== undefined) requireValue(policy.constraints.territories.length > 0 && policy.constraints.territories.every((x) => /^[A-Z]{2}$/.test(x)), 'INVALID_POLICY', 'Territories must be ISO 3166-1 alpha-2 codes');
-  if (policy.constraints.deviceClasses !== undefined) requireValue(policy.constraints.deviceClasses.length > 0 && policy.constraints.deviceClasses.every(Boolean), 'INVALID_POLICY', 'Device classes cannot be empty');
+  if (policy.constraints.territories !== undefined) requireValue(Array.isArray(policy.constraints.territories) && policy.constraints.territories.length > 0 && policy.constraints.territories.length <= 249 && policy.constraints.territories.every((x) => typeof x === 'string' && /^[A-Z]{2}$/.test(x)) && new Set(policy.constraints.territories).size === policy.constraints.territories.length, 'INVALID_POLICY', 'Territories must be distinct two-letter uppercase codes');
+  if (policy.constraints.deviceClasses !== undefined) requireValue(Array.isArray(policy.constraints.deviceClasses) && policy.constraints.deviceClasses.length > 0 && policy.constraints.deviceClasses.length <= 32 && policy.constraints.deviceClasses.every((x) => typeof x === 'string' && /^[a-z][a-z0-9-]{0,31}$/.test(x)) && new Set(policy.constraints.deviceClasses).size === policy.constraints.deviceClasses.length, 'INVALID_POLICY', 'Device classes must be distinct short identifiers');
   if (policy.constraints.minimumDeviceTrust !== undefined) requireValue(['software', 'hardware'].includes(policy.constraints.minimumDeviceTrust), 'INVALID_POLICY', 'Unknown device trust');
-  for (const duty of policy.duties) requireValue(duty !== null && typeof duty === 'object' && ['payment', 'attribution', 'acknowledgement', 'return', 'reporting'].includes(duty.type) && typeof duty.reference === 'string' && duty.reference.length > 0, 'INVALID_POLICY', 'Invalid duty');
+  if (policy.constraints.onlineOnly !== undefined) requireValue(typeof policy.constraints.onlineOnly === 'boolean', 'INVALID_POLICY', 'onlineOnly must be boolean');
+  for (const key of ['organizationId', 'requiredRole', 'assetVersion', 'feature'] as const) {
+    const value = policy.constraints[key];
+    if (value !== undefined) requireValue(typeof value === 'string' && value.length > 0 && value.length <= 256, 'INVALID_POLICY', `${key} must be a short nonempty string`);
+  }
+  requireValue(policy.duties.length <= 32, 'INVALID_POLICY', 'Too many duties');
+  for (const duty of policy.duties) requireValue(duty !== null && typeof duty === 'object' && !Array.isArray(duty) &&
+    Object.keys(duty).length === 2 && Object.hasOwn(duty, 'type') && Object.hasOwn(duty, 'reference') &&
+    ['payment', 'attribution', 'acknowledgement', 'return', 'reporting'].includes(duty.type) &&
+    typeof duty.reference === 'string' && duty.reference.length > 0 && duty.reference.length <= 256,
+  'INVALID_POLICY', 'Invalid duty');
 }
 
 export function analyzeCompatibility(policy: Policy, target: Target): CompatibilityReport {

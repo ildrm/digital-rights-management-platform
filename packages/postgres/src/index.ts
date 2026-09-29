@@ -4,3 +4,5 @@ export * from './license-service.ts';
 export * from './devices.ts';
 export * from './outbox.ts';
 export * from './publishing.ts';
+export * from './maintenance.ts';
+export * from './package-reader.ts';

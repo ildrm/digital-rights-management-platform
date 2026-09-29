@@ -13,7 +13,7 @@ jobs:
     timeout-minutes: 20
     services:
       postgres:
-        image: postgres:18
+        image: postgres:18@sha256:5a5a84b19854a9ffaa54082c166ff4ec27473a361e496e5ea167f298f2da9722
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
@@ -26,10 +26,10 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '26'
           cache: npm
@@ -38,7 +38,7 @@ jobs:
       - run: npm audit --audit-level=high
       - name: Generate dependency SBOM
         run: npm sbom --sbom-format cyclonedx > sbom.cdx.json
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: dependency-sbom
           path: sbom.cdx.json
@@ -54,13 +54,15 @@ jobs:
           psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d drm_test_ci -f infrastructure/postgres/005_outbox.sql
           psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d drm_test_ci -f infrastructure/postgres/006_asset_packages.sql
           psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d drm_test_ci -f infrastructure/postgres/007_publish_rate.sql
+          psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d drm_test_ci -f infrastructure/postgres/008_outbox_delivery.sql
+          psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d drm_test_ci -f infrastructure/postgres/009_package_retrieval.sql
           psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d drm_test_ci -c "CREATE ROLE drm_app_test LOGIN PASSWORD 'test-only'"
           psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d drm_test_ci -c "GRANT USAGE ON SCHEMA drm TO drm_app_test"
           psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d drm_test_ci -c "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA drm TO drm_app_test"
       - name: Start disposable self-hosted providers
         run: |
-          docker run -d --rm --name drm-ci-bao -p 127.0.0.1:18200:8200 --entrypoint bao ghcr.io/openbao/openbao:2.7.0 server -dev -dev-root-token-id=dev-only-token -dev-listen-address=0.0.0.0:8200
-          docker run -d --rm --name drm-ci-s3 -p 127.0.0.1:18333:8333 -v "$PWD/infrastructure/test/seaweedfs-s3.json:/etc/seaweedfs/s3.json:ro" --entrypoint weed ghcr.io/chrislusf/seaweedfs:4.47 mini -dir=/data -bucket=drm-private-packages -s3.config=/etc/seaweedfs/s3.json
+          docker run -d --rm --name drm-ci-bao -p 127.0.0.1:18200:8200 --entrypoint bao ghcr.io/openbao/openbao:2.7.0@sha256:71156a1c6623a5fa3f5e61b0c6a8ead0faf0df29a778339188443551995d1315 server -dev -dev-root-token-id=dev-only-token -dev-listen-address=0.0.0.0:8200
+          docker run -d --rm --name drm-ci-s3 -p 127.0.0.1:18333:8333 -v "$PWD/infrastructure/test/seaweedfs-s3.json:/etc/seaweedfs/s3.json:ro" --entrypoint weed ghcr.io/chrislusf/seaweedfs:4.47@sha256:ce9e796f1fe6f06968f4c04bdaf8f678dad9c8acdfef3d244133d71bfa6bf882 mini -dir=/data -bucket=drm-private-packages -s3.config=/etc/seaweedfs/s3.json
           for i in {1..60}; do
             if curl -fsS http://127.0.0.1:18200/v1/sys/health > /dev/null && (echo > /dev/tcp/127.0.0.1/18333) 2>/dev/null; then break; fi
             sleep 1

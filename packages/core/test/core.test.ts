@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
-import { createCipheriv, createDecipheriv, generateKeyPairSync, randomBytes, sign } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash, generateKeyPairSync, randomBytes, sign } from 'node:crypto';
 import test from 'node:test';
 import {
-  analyzeCompatibility, compilePolicy, createSecurePackage, evaluateAccess,
+  analyzeCompatibility, canonicalJson, compilePolicy, createSecurePackage, evaluateAccess,
   LicenseIssuer, openLicensedChunk, verifyLicense,
   type AccessRequest, type ChallengeStore, type KeyWrapper, type PackageIdentity, type Policy,
 } from '../src/index.ts';
@@ -48,6 +48,19 @@ test('policy compiler is deterministic and rejects silent weakening', () => {
   assert.throws(() => compilePolicy({ ...policy, constraints: { mystery: true } } as unknown as Policy, 'secureViewer'), { code: 'INVALID_POLICY' });
 });
 
+test('policy validation rejects malformed nested fields with domain errors', () => {
+  const invalidConstraints: unknown[] = [
+    { territories: 'GB' }, { deviceClasses: 'desktop' },
+    { onlineOnly: 'true' }, { organizationId: {} },
+    { notBefore: 1 }, { deviceClasses: ['desktop', 'desktop'] },
+  ];
+  for (const constraints of invalidConstraints) {
+    assert.throws(() => compilePolicy({ ...policy, constraints } as Policy, 'secureViewer'), { code: 'INVALID_POLICY' });
+  }
+  assert.throws(() => compilePolicy({ ...policy, duties: [{ type: 'payment', reference: 'order-1', ignored: true }] } as unknown as Policy, 'secureViewer'), { code: 'INVALID_POLICY' });
+  assert.throws(() => compilePolicy({ ...policy, preventOriginalPossession: undefined } as unknown as Policy, 'secureViewer'), { code: 'INVALID_POLICY' });
+});
+
 test('entitlement is tenant-bound, action-bound, time-bound, and duty-bound', () => {
   assert.equal(evaluateAccess(request).allowed, true);
   assert.equal(evaluateAccess({ ...request, device: { ...request.device, tenantId: 'tenant-b' } }).allowed, false);
@@ -57,6 +70,7 @@ test('entitlement is tenant-bound, action-bound, time-bound, and duty-bound', ()
   assert.equal(evaluateAccess({ ...request, entitlement: { ...request.entitlement, policyVersion: 2 } }).allowed, false);
   assert.equal(evaluateAccess({ ...request, context: { ...request.context, activeDeviceCount: 1 } }).allowed, true);
   assert.equal(evaluateAccess({ ...request, context: { ...request.context, activeDeviceCount: 2 } }).allowed, false);
+  assert.equal(evaluateAccess({ ...request, context: { ...request.context, useCount: -1 } }).allowed, false);
 });
 
 test('license requires device proof and consumes each challenge once', async () => {
@@ -78,6 +92,11 @@ test('license requires device proof and consumes each challenge once', async () 
   assert.equal(verifyLicense(license, { ...trustedIssuer, keyId: 'different-key' }, 'device-1', now), false);
   assert.equal(verifyLicense(license, trustedIssuer, 'another-device', now), false);
   assert.equal(verifyLicense({ ...license, claims: { ...license.claims, assetId: 'forged' } }, trustedIssuer, 'device-1', now), false);
+  const invalidClaims = { ...license.claims, expiresAt: 'invalid-date' };
+  const invalidDigest = createHash('sha256').update('drm-license-v1\0').update(canonicalJson(invalidClaims)).digest();
+  const invalidSignedLicense = { ...license, claims: invalidClaims, signature: sign(null, invalidDigest, issuerKeys.privateKey).toString('base64url') };
+  assert.equal(verifyLicense(invalidSignedLicense, trustedIssuer, 'device-1', now), false);
+  assert.equal(verifyLicense(null as unknown as typeof license, trustedIssuer, 'device-1', now), false);
   await assert.rejects(issuer.issue(input), { code: 'DEVICE_PROOF_REPLAY' });
   await assert.rejects(issuer.issue({ ...input, deviceProof: { ...deviceProof, signature: 'bad' } }), { code: 'DEVICE_PROOF_INVALID' });
 });
@@ -110,17 +129,26 @@ test('encrypted package authenticates content, metadata, and tenant identity', a
     { async consume() { return true; } }, () => now,
   ).issue({ ...request, renditionId: 'r1', deviceProof: { challenge, signature: sign(null, Buffer.from(challenge), deviceKeys.privateKey).toString('base64url') }, keyReference: 'kms:key-1', issuer: 'local-test', requestedSeconds: 900 });
   const open = (candidate: typeof pkg, candidateIdentity = identity, action: typeof request.action = 'read') =>
-    openLicensedChunk(candidate, 0, candidateIdentity, keys, trustedIssuer, license, trustedIssuer, request.device.id, now, action);
-  const opened = await Promise.all(pkg.manifest.chunks.map((chunk) => openLicensedChunk(pkg, chunk.index, identity, keys, trustedIssuer, license, trustedIssuer, request.device.id, now, 'read')));
+    openLicensedChunk(candidate, 0, candidateIdentity, keys, trustedIssuer, license, trustedIssuer, request.device.id, now, action, true);
+  const opened = await Promise.all(pkg.manifest.chunks.map((chunk) => openLicensedChunk(pkg, chunk.index, identity, keys, trustedIssuer, license, trustedIssuer, request.device.id, now, 'read', true)));
   assert.deepEqual(Buffer.concat(opened), content);
+  assert.deepEqual(await openLicensedChunk(pkg, 0, identity, keys, trustedIssuer, license, trustedIssuer, request.device.id, now, 'read', false), content.subarray(0, 16));
+  await assert.rejects(openLicensedChunk(pkg, 0, identity, keys, trustedIssuer, license, trustedIssuer, request.device.id, '2026-09-28T10:11:00.000Z', 'read', false), { code: 'OFFLINE_ACCESS_DENIED' });
+  const onlineClaims = { ...license.claims, offlineUntil: null };
+  const onlineDigest = createHash('sha256').update('drm-license-v1\0').update(canonicalJson(onlineClaims)).digest();
+  const onlineLicense = { ...license, claims: onlineClaims, signature: sign(null, onlineDigest, issuerKeys.privateKey).toString('base64url') };
+  await assert.rejects(openLicensedChunk(pkg, 0, identity, keys, trustedIssuer, onlineLicense, trustedIssuer, request.device.id, now, 'read', false), { code: 'OFFLINE_ACCESS_DENIED' });
   await assert.rejects(open(pkg, { ...identity, tenantId: 'tenant-b' }), { code: 'LICENSE_SCOPE' });
   await assert.rejects(open(pkg, identity, 'play'), { code: 'LICENSE_SCOPE' });
   await assert.rejects(open({ ...pkg, manifest: { ...pkg.manifest, wrappedKey: { ...pkg.manifest.wrappedKey, keyReference: 'other' } } }), { code: 'LICENSE_SCOPE' });
   const altered = { ...pkg, ciphertextChunks: ['AAAA', ...pkg.ciphertextChunks.slice(1)] };
   await assert.rejects(open(altered), { code: 'INVALID_CHUNK' });
   const forged = { ...pkg, manifest: { ...pkg.manifest, totalBytes: 1 } };
-  await assert.rejects(open(forged), { code: 'INVALID_SIGNATURE' });
-  await assert.rejects(openLicensedChunk(pkg, 0, identity, keys, { ...trustedIssuer, keyId: 'wrong-key' }, license, trustedIssuer, request.device.id, now, 'read'), { code: 'INVALID_SIGNING_KEY' });
+  await assert.rejects(open(forged), { code: 'INVALID_PACKAGE' });
+  const malformed = { ...pkg, manifest: { ...pkg.manifest, chunks: [{ ...pkg.manifest.chunks[0], nonce: 1 }, ...pkg.manifest.chunks.slice(1)] } };
+  await assert.rejects(open(malformed as unknown as typeof pkg), { code: 'INVALID_PACKAGE' });
+  await assert.rejects(open({ ...pkg, manifest: { ...pkg.manifest, identity: { ...identity, extra: 'ignored' } } } as unknown as typeof pkg), { code: 'INVALID_IDENTITY' });
+  await assert.rejects(openLicensedChunk(pkg, 0, identity, keys, { ...trustedIssuer, keyId: 'wrong-key' }, license, trustedIssuer, request.device.id, now, 'read', true), { code: 'INVALID_SIGNING_KEY' });
   await assert.rejects(createSecurePackage(Buffer.alloc(17_000), identity, keys, signer, 1), { code: 'INVALID_CHUNK_SIZE' });
   root.fill(0);
 });

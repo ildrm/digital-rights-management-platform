@@ -6,7 +6,7 @@ import pg from 'pg';
 import { openLicensedChunk, verifyLicense, type SecurePackage } from '@drm/core';
 import { S3CompatiblePackageStore } from '@drm/aws-s3';
 import { OpenBaoKeyWrapper, OpenBaoLicenseSigner, OpenBaoTransitClient } from '@drm/openbao';
-import { issueDeviceChallenge, PostgresAssetPublisher, PostgresLicenseService, withTenantTransaction } from '../src/index.ts';
+import { issueDeviceChallenge, PostgresAssetPublisher, PostgresLicenseService, PostgresPackageReader, withTenantTransaction } from '../src/index.ts';
 
 test('self-hosted OpenBao, SeaweedFS and PostgreSQL publish and license a protected asset end to end',
   { skip: process.env.SELFHOST_TEST !== '1' }, async () => {
@@ -71,12 +71,21 @@ test('self-hosted OpenBao, SeaweedFS and PostgreSQL publish and license a protec
       const object = await s3.send(new GetObjectCommand({ Bucket: 'drm-private-packages', Key: objectKey }));
       const bytes = Buffer.from(await object.Body!.transformToByteArray());
       assert.ok(!bytes.toString().includes(content.toString()));
+      const reader = new PostgresPackageReader(pool, store);
+      const readRequest = { tenantId, authenticatedUserId: userId, assetId: published.assetId,
+        renditionId: published.renditionId, licenseId: license.claims.licenseId };
+      assert.deepEqual(await reader.read(readRequest), bytes);
+      await assert.rejects(reader.read({ ...readRequest, authenticatedUserId: randomUUID() }), { code: 'ACCESS_DENIED' });
       const pkg = JSON.parse(bytes.toString('utf8')) as SecurePackage;
       const opened = await openLicensedChunk(pkg, 0, {
         tenantId, assetId: published.assetId, assetVersion: '1', renditionId: published.renditionId,
         mimeType: 'application/pdf',
-      }, wrapper, trust, license, trust, deviceId, new Date().toISOString(), 'read');
+      }, wrapper, trust, license, trust, deviceId, new Date().toISOString(), 'read', true);
       assert.deepEqual(opened, content);
+      await withTenantTransaction(pool, tenantId, (client) => client.query(
+        'UPDATE drm.licenses SET revoked_at = clock_timestamp() WHERE tenant_id = $1 AND id = $2',
+        [tenantId, license.claims.licenseId]));
+      await assert.rejects(reader.read(readRequest), { code: 'ACCESS_DENIED' });
     } finally {
       if (objectKey) await store.delete(objectKey);
       s3.destroy();

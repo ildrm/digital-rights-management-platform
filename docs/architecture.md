@@ -2,24 +2,21 @@
 
 ## Current bounded context
 
-`packages/core` is a dependency-free domain/security library. Its calls are synchronous or narrowly asynchronous and make no database or network assumptions. It does not authenticate callers or store state. `packages/postgres` adds tenant-scoped transactions, atomic one-time device challenges, license issuance, and an asset publisher that commits catalog, policy, audit, and outbox rows together after encrypted object upload. `packages/openbao` supplies the active Transit signing and key-wrapping calls. `packages/aws-s3` uses the S3 protocol to store encrypted packages with checksums and conditional creation; the active target is SeaweedFS. `packages/api` verifies OIDC access tokens, maps verified subjects to active users, rate-limits requests in PostgreSQL, and exposes challenge, license, and optional creator publishing routes. The container entry point wires the API to PostgreSQL, OpenBao, and an explicit S3-compatible endpoint. The optional AWS KMS and Axinom adapters are inactive in this runtime.
+`packages/core` is a dependency-free domain/security library. Its calls are synchronous or narrowly asynchronous and make no database or network assumptions. It does not authenticate callers or store state. `packages/postgres` adds tenant-scoped transactions, atomic one-time device challenges, license issuance, an asset publisher that commits catalog, policy, audit, and outbox rows together after encrypted object upload, and a licensed package reader. `packages/openbao` supplies the active Transit signing and key-wrapping calls. `packages/aws-s3` uses the S3 protocol to store encrypted packages with checksums and conditional creation; the active target is SeaweedFS. `packages/api` verifies OIDC access tokens, maps verified subjects to active users, rate-limits requests in PostgreSQL, and exposes challenge, license, encrypted-package retrieval, and optional creator publishing routes. The container entry point wires the API to PostgreSQL, OpenBao, and an explicit S3-compatible endpoint. The optional AWS KMS and Axinom adapters are inactive in this runtime.
+
+The implemented server-side path is:
 
 ```mermaid
 flowchart LR
-  Creator --> Policy[Versioned policy]
-  Policy --> Compiler[Policy compiler]
-  Compiler --> Target[Target-specific enforcement]
-  Customer --> Identity[Authenticated principal]
-  Identity --> Entitlement[Durable entitlement]
-  Entitlement --> Decision[Access decision]
-  Target --> Decision
-  Device[Registered device key] --> Proof[One-time proof]
-  Proof --> License[License issuer]
-  Decision --> License
-  Bao[OpenBao Transit] --> Package[Encrypted rendition]
-  License --> Client[Trusted client]
-  Package --> Client
+  Caller[Authenticated caller] --> API[Device, license and publish API]
+  IdP[OIDC JWKS] --> API
+  API --> Core[Policy and package library]
+  API --> PG[(PostgreSQL: grants, policies, devices, audit, outbox)]
+  API --> Bao[OpenBao Transit: signing and key wrapping]
+  API --> S3[SeaweedFS: encrypted packages]
 ```
+
+The protected viewer and all media-specific enforcement targets are planned; no consumer client is included in this repository.
 
 ## Architectural decisions
 
@@ -50,7 +47,7 @@ The service map covers identity/accounts/teams, creator and rights-holder manage
 - Issuance checks device limits and concurrent sessions inside a serialized transaction.
 - Every security-sensitive mutation writes a non-secret audit event and transactional outbox record.
 
-License issuance and device registration/revocation now write outbox rows in the same transaction as their state and audit changes. Claims use PostgreSQL `FOR UPDATE SKIP LOCKED` leases and tenant RLS. Downstream publication and consumer idempotency remain to be implemented.
+License issuance and device registration/revocation write outbox rows in the same transaction as their state and audit changes. Claims use PostgreSQL `FOR UPDATE SKIP LOCKED` leases and tenant RLS. A separate worker now sends signed HTTPS events with bounded retry and dead-letter recovery, and cleans expired ephemeral rows. No production event recipient, worker deployment, consumer idempotency verification, or alerting has been exercised.
 
 ## Enforcement boundary
 

@@ -42,6 +42,15 @@ export function evaluateAccess(request: AccessRequest): AccessDecision {
   const reasons: string[] = [];
   const now = validInstant(context.now);
   if (now === undefined) reasons.push('invalid trusted time');
+  for (const [name, value] of [
+    ['activeDeviceCount', context.activeDeviceCount],
+    ['activeSessionCount', context.activeSessionCount],
+    ['useCount', context.useCount],
+    ['exportCount', context.exportCount],
+    ['creditsUsed', context.creditsUsed],
+  ] as const) {
+    if (!Number.isSafeInteger(value) || value < 0) reasons.push(`invalid ${name}`);
+  }
   if (principal.tenantId !== policy.tenantId || entitlement.tenantId !== policy.tenantId || device.tenantId !== policy.tenantId || entitlement.subject.tenantId !== policy.tenantId) reasons.push('tenant mismatch');
   if (entitlement.assetId !== policy.assetId || entitlement.policyId !== policy.id || entitlement.policyVersion !== policy.version || entitlement.assetVersion !== assetVersion) reasons.push('entitlement does not match asset or policy version');
   if (policy.constraints.assetVersion !== undefined && policy.constraints.assetVersion !== assetVersion) reasons.push('asset version constraint');
