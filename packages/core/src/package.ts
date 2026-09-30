@@ -26,6 +26,7 @@ export interface WrappedKey {
 
 export interface KeyWrapper {
   wrap(dataKey: Buffer, identity: PackageIdentity): Promise<WrappedKey>;
+  /** Transfers ownership of a fresh 32-byte buffer; the caller wipes it after use. */
   unwrap(wrapped: WrappedKey, identity: PackageIdentity): Promise<Buffer>;
 }
 
@@ -187,14 +188,14 @@ export async function openLicensedChunk(
   requireValue(ciphertext.length === metadata.length && ciphertext.toString('base64url') === encoded,
     'INVALID_CHUNK', 'Chunk length or encoding mismatch');
   requireValue(createHash('sha256').update(ciphertext).digest('hex') === metadata.ciphertextSha256, 'INVALID_CHUNK', 'Chunk checksum mismatch');
-  const dataKey = Buffer.from(await keys.unwrap(pkg.manifest.wrappedKey, pkg.manifest.identity));
+  const dataKey = await keys.unwrap(pkg.manifest.wrappedKey, pkg.manifest.identity);
   try {
-    requireValue(dataKey.length === 32, 'INVALID_KEY', 'Unwrapped key must be 256 bits');
+    requireValue(Buffer.isBuffer(dataKey) && dataKey.length === 32, 'INVALID_KEY', 'Unwrapped key must be a 256-bit buffer');
     const decipher = createDecipheriv('aes-256-gcm', dataKey, Buffer.from(metadata.nonce, 'base64url'));
     decipher.setAAD(associatedData(pkg.manifest.identity, index, metadata.length));
     decipher.setAuthTag(Buffer.from(metadata.tag, 'base64url'));
     return Buffer.concat([decipher.update(ciphertext), decipher.final()]);
   } finally {
-    dataKey.fill(0);
+    if (Buffer.isBuffer(dataKey)) dataKey.fill(0);
   }
 }

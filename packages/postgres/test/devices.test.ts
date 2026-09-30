@@ -19,7 +19,9 @@ test('device enrollment proves key possession, blocks replay, and revokes owned 
   const keys = generateKeyPairSync('ed25519');
   const otherKeys = generateKeyPairSync('ed25519');
   const publicKeyPem = keys.publicKey.export({ type: 'spki', format: 'pem' }).toString();
+  const privateKeyPem = keys.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
   try {
+    await assert.rejects(issueDeviceEnrollmentChallenge(pool, tenantId, userId, privateKeyPem, 'desktop'), { code: 'INVALID_DEVICE_KEY' });
     await withTenantTransaction(pool, tenantId, async (client) => {
       await client.query('INSERT INTO drm.tenants (id, slug) VALUES ($1, $2)', [tenantId, `test-${tenantId}`]);
       await client.query("INSERT INTO drm.users (tenant_id, id, external_subject, status) VALUES ($1, $2, $3, 'active')", [tenantId, userId, `idp:${userId}`]);
@@ -34,15 +36,15 @@ test('device enrollment proves key possession, blocks replay, and revokes owned 
     const id = await registerDevice(pool, input);
     await assert.rejects(registerDevice(pool, input), { code: 'DEVICE_PROOF_REPLAY' });
     const result = await withTenantTransaction(pool, tenantId, async (client) => {
-      const device = await client.query<{ trust_level: string; user_id: string }>(
-        'SELECT trust_level, user_id FROM drm.devices WHERE tenant_id = $1 AND id = $2', [tenantId, id]);
+      const device = await client.query<{ trust_level: string; user_id: string; public_key_pem: string }>(
+        'SELECT trust_level, user_id, public_key_pem FROM drm.devices WHERE tenant_id = $1 AND id = $2', [tenantId, id]);
       const audit = await client.query<{ count: number }>(
         "SELECT count(*)::integer AS count FROM drm.audit_events WHERE tenant_id = $1 AND event_type = 'device.registered'", [tenantId]);
       const outbox = await client.query<{ count: number }>(
         "SELECT count(*)::integer AS count FROM drm.outbox_events WHERE tenant_id = $1 AND event_type = 'device.registered'", [tenantId]);
       return { device: device.rows[0], auditCount: audit.rows[0]?.count, outboxCount: outbox.rows[0]?.count };
     });
-    assert.deepEqual(result, { device: { trust_level: 'software', user_id: userId }, auditCount: 1, outboxCount: 1 });
+    assert.deepEqual(result, { device: { trust_level: 'software', user_id: userId, public_key_pem: publicKeyPem }, auditCount: 1, outboxCount: 1 });
     await revokeOwnedDevice(pool, tenantId, userId, id);
     await assert.rejects(revokeOwnedDevice(pool, tenantId, userId, id), { code: 'DEVICE_NOT_FOUND' });
     const revoked = await withTenantTransaction(pool, tenantId, async (client) => {

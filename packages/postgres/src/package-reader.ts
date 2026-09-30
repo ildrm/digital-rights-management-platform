@@ -31,10 +31,13 @@ export class PostgresPackageReader {
     this.store = store;
   }
 
-  async read(request: PackageReadRequest): Promise<Buffer> {
-    if (Object.values(request).some((value) => typeof value !== 'string' || !UUID.test(value))) {
+  async read(value: PackageReadRequest): Promise<Buffer> {
+    const fields = ['tenantId', 'authenticatedUserId', 'assetId', 'renditionId', 'licenseId'] as const;
+    if (!value || typeof value !== 'object' || Object.keys(value).length !== fields.length ||
+      fields.some((field) => typeof value[field] !== 'string' || !UUID.test(value[field]))) {
       throw new DomainError('INVALID_REQUEST', 'Package request identifiers must be UUIDs');
     }
+    const request = Object.fromEntries(fields.map((field) => [field, value[field].toLowerCase()])) as unknown as PackageReadRequest;
     const row = await withTenantTransaction(this.pool, request.tenantId, async (client) => {
       const result = await client.query<PackageRow>(
         `SELECT ap.object_key, ap.package_sha256, ap.package_bytes

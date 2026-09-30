@@ -1,5 +1,6 @@
 import type { Action, Device, Entitlement, Policy, Principal } from './model.ts';
 import { validatePolicy } from './policy.ts';
+import { requireValue } from './errors.ts';
 
 export interface DecisionContext {
   readonly now: string;
@@ -13,6 +14,7 @@ export interface DecisionContext {
   readonly exportCount: number;
   readonly creditsUsed: number;
   readonly fulfilledDuties: readonly string[];
+  readonly features?: readonly string[];
 }
 
 export interface AccessRequest {
@@ -32,11 +34,21 @@ export interface AccessDecision {
 }
 
 function validInstant(value: string): number | undefined {
+  if (typeof value !== 'string') return undefined;
   const result = Date.parse(value);
   return Number.isFinite(result) && new Date(result).toISOString() === value ? result : undefined;
 }
 
 export function evaluateAccess(request: AccessRequest): AccessDecision {
+  requireValue(request !== null && typeof request === 'object' && !Array.isArray(request) &&
+    request.principal !== null && typeof request.principal === 'object' &&
+    request.device !== null && typeof request.device === 'object' &&
+    request.entitlement !== null && typeof request.entitlement === 'object' &&
+    request.entitlement.subject !== null && typeof request.entitlement.subject === 'object' &&
+    request.context !== null && typeof request.context === 'object' &&
+    Array.isArray(request.context.roles) && Array.isArray(request.context.fulfilledDuties) &&
+    (request.context.features === undefined || Array.isArray(request.context.features)),
+  'INVALID_REQUEST', 'Complete access decision inputs required');
   const { principal, device, entitlement, policy, assetVersion, action, context } = request;
   validatePolicy(policy);
   const reasons: string[] = [];
@@ -84,6 +96,7 @@ export function evaluateAccess(request: AccessRequest): AccessDecision {
   if (policy.constraints.creditLimit !== undefined && (!Number.isSafeInteger(context.creditsUsed) || context.creditsUsed >= policy.constraints.creditLimit)) reasons.push('credit limit reached');
   if (policy.constraints.organizationId !== undefined && context.organizationId !== policy.constraints.organizationId) reasons.push('organization restricted');
   if (policy.constraints.requiredRole !== undefined && !context.roles.includes(policy.constraints.requiredRole)) reasons.push('role required');
+  if (policy.constraints.feature !== undefined && !context.features?.includes(policy.constraints.feature)) reasons.push('feature restricted');
   for (const duty of policy.duties) if (!context.fulfilledDuties.includes(`${duty.type}:${duty.reference}`)) reasons.push(`duty unfulfilled: ${duty.type}`);
   return { allowed: reasons.length === 0, reasons, policyVersion: policy.version };
 }

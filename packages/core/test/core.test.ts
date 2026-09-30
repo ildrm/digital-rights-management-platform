@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { createCipheriv, createDecipheriv, createHash, generateKeyPairSync, randomBytes, sign } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import test from 'node:test';
 import {
   analyzeCompatibility, canonicalJson, compilePolicy, createSecurePackage, evaluateAccess,
@@ -46,9 +47,29 @@ test('policy compiler is deterministic and rejects silent weakening', () => {
   assert.throws(() => compilePolicy({ ...policy, permissions: ['downloadOriginal'] }, 'secureViewer'), { code: 'POLICY_CONTRADICTION' });
   assert.throws(() => compilePolicy({ ...policy, constraints: { onlineOnly: true, offlineSeconds: 60 } }, 'secureViewer'), { code: 'POLICY_CONTRADICTION' });
   assert.throws(() => compilePolicy({ ...policy, constraints: { mystery: true } } as unknown as Policy, 'secureViewer'), { code: 'INVALID_POLICY' });
+  for (const target of ['publication', 'software', 'remoteExecution'] as const) {
+    assert.equal(analyzeCompatibility({ ...policy, permissions: ['read'], duties: [], constraints: {} }, target).compatible, false);
+  }
+  assert.throws(() => compilePolicy(policy, 'constructor' as never), { code: 'INVALID_TARGET' });
+});
+
+test('policy v2 digest is stable across process locales', () => {
+  const fixture = { ...policy, duties: [
+    { type: 'attribution' as const, reference: 'Örebro' },
+    { type: 'attribution' as const, reference: 'Åland' },
+    { type: 'attribution' as const, reference: 'Zurich' },
+  ] };
+  const source = `import { compilePolicy } from ${JSON.stringify(new URL('../src/index.ts', import.meta.url).href)};` +
+    "process.stdout.write(compilePolicy(JSON.parse(process.argv[1]), 'secureViewer').sourceDigest)";
+  const digests = ['en_US.UTF-8', 'sv_SE.UTF-8', 'tr_TR.UTF-8'].map((locale) =>
+    execFileSync(process.execPath, ['--experimental-strip-types', '--input-type=module', '-e', source, JSON.stringify(fixture)],
+      { encoding: 'utf8', env: { ...process.env, LANG: locale, LC_ALL: locale } }));
+  assert.equal(new Set(digests).size, 1);
+  assert.equal(digests[0], compilePolicy(fixture, 'secureViewer').sourceDigest);
 });
 
 test('policy validation rejects malformed nested fields with domain errors', () => {
+  assert.throws(() => evaluateAccess(null as never), { code: 'INVALID_REQUEST' });
   const invalidConstraints: unknown[] = [
     { territories: 'GB' }, { deviceClasses: 'desktop' },
     { onlineOnly: 'true' }, { organizationId: {} },
@@ -71,6 +92,22 @@ test('entitlement is tenant-bound, action-bound, time-bound, and duty-bound', ()
   assert.equal(evaluateAccess({ ...request, context: { ...request.context, activeDeviceCount: 1 } }).allowed, true);
   assert.equal(evaluateAccess({ ...request, context: { ...request.context, activeDeviceCount: 2 } }).allowed, false);
   assert.equal(evaluateAccess({ ...request, context: { ...request.context, useCount: -1 } }).allowed, false);
+  assert.equal(evaluateAccess({ ...request, policy: { ...policy, constraints: { feature: 'premium' } } }).allowed, false);
+  assert.equal(evaluateAccess({ ...request, policy: { ...policy, constraints: { feature: 'premium' } },
+    context: { ...request.context, features: ['premium'] } }).allowed, true);
+});
+
+test('license issuer signs the authorized snapshot if its caller changes input during challenge consumption', async () => {
+  const issuer = new LicenseIssuer({ keyId: 'test-signing-key', async signEd25519(message) {
+    return sign(null, message, issuerKeys.privateKey);
+  } }, { async consume() { input.action = 'downloadOriginal'; return true; } }, () => now);
+  const challenge = 'snapshot-challenge-0001';
+  const input = { ...request, action: 'read' as typeof request.action, renditionId: 'r1',
+    deviceProof: { challenge, signature: sign(null, Buffer.from(challenge), deviceKeys.privateKey).toString('base64url') },
+    keyReference: 'kms:key-1', issuer: 'local-test', requestedSeconds: 60 };
+  const license = await issuer.issue(input);
+  assert.deepEqual(license.claims.rights, ['read']);
+  assert.equal(verifyLicense(license, trustedIssuer, 'device-1', now), true);
 });
 
 test('license requires device proof and consumes each challenge once', async () => {
@@ -151,4 +188,24 @@ test('encrypted package authenticates content, metadata, and tenant identity', a
   await assert.rejects(openLicensedChunk(pkg, 0, identity, keys, { ...trustedIssuer, keyId: 'wrong-key' }, license, trustedIssuer, request.device.id, now, 'read', true), { code: 'INVALID_SIGNING_KEY' });
   await assert.rejects(createSecurePackage(Buffer.alloc(17_000), identity, keys, signer, 1), { code: 'INVALID_CHUNK_SIZE' });
   root.fill(0);
+});
+
+test('package opener wipes the key buffer returned by its wrapper', async () => {
+  const identity: PackageIdentity = { tenantId: 'tenant-a', assetId: 'asset-1', assetVersion: 'v1', renditionId: 'r1', mimeType: 'text/plain' };
+  let returnedKey: Buffer | undefined;
+  const signer = { keyId: 'test-signing-key', async signEd25519(message: Buffer) { return sign(null, message, issuerKeys.privateKey); } };
+  let packageKey: Buffer | undefined;
+  const capturingKeys: KeyWrapper = {
+    async wrap(key) { packageKey = Buffer.from(key); return { provider: 'test-only', keyVersion: '1', keyReference: 'kms:key-1', ciphertext: 'wrapped' }; },
+    async unwrap() { returnedKey = Buffer.from(packageKey!); return returnedKey; },
+  };
+  const capturedPkg = await createSecurePackage(Buffer.from('cleartext'), identity, capturingKeys, signer);
+  const challenge = 'key-wipe-challenge-0001';
+  const license = await new LicenseIssuer(signer, { async consume() { return true; } }, () => now).issue({
+    ...request, renditionId: 'r1', keyReference: 'kms:key-1', issuer: 'local-test', requestedSeconds: 60,
+    deviceProof: { challenge, signature: sign(null, Buffer.from(challenge), deviceKeys.privateKey).toString('base64url') },
+  });
+  await openLicensedChunk(capturedPkg, 0, identity, capturingKeys, trustedIssuer, license, trustedIssuer, 'device-1', now, 'read', true);
+  assert.equal(returnedKey?.every((byte) => byte === 0), true);
+  packageKey?.fill(0);
 });

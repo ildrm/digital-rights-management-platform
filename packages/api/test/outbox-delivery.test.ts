@@ -10,6 +10,7 @@ const event = {
   aggregateId: '00000000-0000-4000-8000-000000000003',
   payload: { deviceId: '00000000-0000-4000-8000-000000000004' },
   attempts: 1,
+  claimToken: '00000000-0000-4000-8000-000000000005',
 };
 
 test('webhook delivery signs the exact body and requires a successful HTTPS response', async () => {

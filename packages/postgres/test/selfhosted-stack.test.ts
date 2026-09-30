@@ -20,6 +20,10 @@ test('self-hosted OpenBao, SeaweedFS and PostgreSQL publish and license a protec
       host: process.env.PG_TEST_HOST ?? '/private/tmp', port: Number(process.env.PG_TEST_PORT ?? '55432'),
       user: process.env.PG_TEST_USER ?? 'drm_app_test', database, max: 4, connectionTimeoutMillis: 3000,
     });
+    const runtimePool = process.env.PG_RUNTIME_TEST_USER ? new pg.Pool({
+      host: process.env.PG_TEST_HOST ?? '/private/tmp', port: Number(process.env.PG_TEST_PORT ?? '55432'),
+      user: process.env.PG_RUNTIME_TEST_USER, database, max: 4, connectionTimeoutMillis: 3000,
+    }) : pool;
     const s3 = new S3Client({
       region: 'us-east-1', endpoint: process.env.S3_TEST_URL ?? 'http://127.0.0.1:18333/',
       forcePathStyle: true, credentials: { accessKeyId: s3Access, secretAccessKey: s3Secret }, maxAttempts: 1,
@@ -33,7 +37,7 @@ test('self-hosted OpenBao, SeaweedFS and PostgreSQL publish and license a protec
     const entitlementId = randomUUID();
     const deviceKeys = generateKeyPairSync('ed25519');
     const wrapper = new OpenBaoKeyWrapper(bao, () => ({ activeKeyName: 'tenant-key', permittedKeyNames: ['tenant-key'] }));
-    const publisher = new PostgresAssetPublisher(pool, store, wrapper, signer);
+    const publisher = new PostgresAssetPublisher(runtimePool, store, wrapper, signer);
     const content = Buffer.from('self-hosted protected document bytes');
     let objectKey: string | undefined;
     try {
@@ -44,7 +48,7 @@ test('self-hosted OpenBao, SeaweedFS and PostgreSQL publish and license a protec
         await client.query("INSERT INTO drm.devices (tenant_id, id, user_id, public_key_pem, trust_level, device_class) VALUES ($1, $2, $3, $4, 'software', 'desktop')",
           [tenantId, deviceId, userId, deviceKeys.publicKey.export({ type: 'spki', format: 'pem' }).toString()]);
       });
-      const published = await publisher.publish({ tenantId, ownerUserId: userId, content, mimeType: 'application/pdf',
+      const published = await publisher.publish({ idempotencyKey: randomUUID(), tenantId, ownerUserId: userId, content, mimeType: 'application/pdf',
         policy: { profile: 'protected', permissions: ['read'], prohibitions: ['downloadOriginal'],
           duties: [], constraints: { onlineOnly: true, maxDevices: 1 }, preventOriginalPossession: true } });
       objectKey = published.objectKey;
@@ -57,7 +61,7 @@ test('self-hosted OpenBao, SeaweedFS and PostgreSQL publish and license a protec
         );
       });
       const challenge = await issueDeviceChallenge(pool, tenantId, userId, deviceId);
-      const licenseService = new PostgresLicenseService(pool, signer, wrapper, 'selfhost-test', () => new Date().toISOString());
+      const licenseService = new PostgresLicenseService(runtimePool, signer, wrapper, 'selfhost-test', () => new Date().toISOString());
       const license = await licenseService.issue({ tenantId, authenticatedUserId: userId, entitlementId, deviceId,
         renditionId: published.renditionId, action: 'read', requestedSeconds: 300,
         proof: { challenge, signature: sign(null, Buffer.from(challenge), deviceKeys.privateKey).toString('base64url') } });
@@ -71,7 +75,7 @@ test('self-hosted OpenBao, SeaweedFS and PostgreSQL publish and license a protec
       const object = await s3.send(new GetObjectCommand({ Bucket: 'drm-private-packages', Key: objectKey }));
       const bytes = Buffer.from(await object.Body!.transformToByteArray());
       assert.ok(!bytes.toString().includes(content.toString()));
-      const reader = new PostgresPackageReader(pool, store);
+      const reader = new PostgresPackageReader(runtimePool, store);
       const readRequest = { tenantId, authenticatedUserId: userId, assetId: published.assetId,
         renditionId: published.renditionId, licenseId: license.claims.licenseId };
       assert.deepEqual(await reader.read(readRequest), bytes);
@@ -89,6 +93,7 @@ test('self-hosted OpenBao, SeaweedFS and PostgreSQL publish and license a protec
     } finally {
       if (objectKey) await store.delete(objectKey);
       s3.destroy();
+      if (runtimePool !== pool) await runtimePool.end();
       await pool.end();
     }
   });

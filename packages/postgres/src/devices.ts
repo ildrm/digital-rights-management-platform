@@ -6,14 +6,21 @@ import { appendOutboxEvent } from './outbox.ts';
 
 const DEVICE_CLASS = /^[a-z][a-z0-9-]{0,31}$/;
 
-function publicKey(publicKeyPem: string): { key: KeyObject; fingerprint: Buffer } {
+function publicKey(publicKeyPem: string): { key: KeyObject; fingerprint: Buffer; canonicalPem: string } {
   if (typeof publicKeyPem !== 'string' || publicKeyPem.length < 64 || publicKeyPem.length > 2048) {
     throw new DomainError('INVALID_DEVICE_KEY', 'Ed25519 public key PEM required');
   }
   try {
+    if (!publicKeyPem.startsWith('-----BEGIN PUBLIC KEY-----\n')) {
+      throw new DomainError('INVALID_DEVICE_KEY', 'Public-only SPKI PEM required');
+    }
     const key = createPublicKey(publicKeyPem);
-    if (key.asymmetricKeyType !== 'ed25519') throw new DomainError('INVALID_DEVICE_KEY', 'Ed25519 public key required');
-    return { key, fingerprint: createHash('sha256').update(key.export({ type: 'spki', format: 'der' })).digest() };
+    if (key.type !== 'public' || key.asymmetricKeyType !== 'ed25519') throw new DomainError('INVALID_DEVICE_KEY', 'Ed25519 public key required');
+    const canonicalPem = key.export({ type: 'spki', format: 'pem' }).toString();
+    if (publicKeyPem.trimEnd() !== canonicalPem.trimEnd()) {
+      throw new DomainError('INVALID_DEVICE_KEY', 'One canonical public key required');
+    }
+    return { key, canonicalPem, fingerprint: createHash('sha256').update(key.export({ type: 'spki', format: 'der' })).digest() };
   } catch {
     throw new DomainError('INVALID_DEVICE_KEY', 'Ed25519 public key PEM required');
   }
@@ -65,7 +72,7 @@ export interface RegisterDeviceInput {
 }
 
 export async function registerDevice(pool: Pool, input: RegisterDeviceInput): Promise<string> {
-  const { key, fingerprint } = publicKey(input.publicKeyPem);
+  const { key, fingerprint, canonicalPem } = publicKey(input.publicKeyPem);
   deviceClass(input.deviceClass);
   if (typeof input.challenge !== 'string' || input.challenge.length < 16 || input.challenge.length > 256 ||
       typeof input.signature !== 'string' || input.signature.length < 1 || input.signature.length > 256 ||
@@ -96,7 +103,7 @@ export async function registerDevice(pool: Pool, input: RegisterDeviceInput): Pr
       `INSERT INTO drm.devices (tenant_id, id, user_id, public_key_pem, public_key_sha256, trust_level, device_class)
        VALUES ($1, $2, $3, $4, $5, 'software', $6)
        ON CONFLICT DO NOTHING RETURNING id`,
-      [input.tenantId, id, input.userId, input.publicKeyPem, fingerprint, input.deviceClass],
+      [input.tenantId, id, input.userId, canonicalPem, fingerprint, input.deviceClass],
     );
     if (inserted.rowCount !== 1) throw new DomainError('DEVICE_ALREADY_REGISTERED', 'This key is already registered');
     await client.query(

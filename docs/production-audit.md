@@ -1,6 +1,6 @@
 # Production requirements audit — 2026-09-29
 
-Scope: the 5,236-line universal digital-rights implementation prompt supplied with this project, all repository documentation, migrations, source, tests, container configuration, and CI. This audit records observable implementation and evidence. A missing subsystem is a release failure, even when a related interface or design note exists. `PASS` means the stated narrow capability was exercised locally; it does not certify a production deployment.
+This is the **historical 2026-09-29 baseline**. Current findings and revision-specific evidence are in the [2026-09-30 implementation status](remediation-implementation-status.md) and [release review](release-status.md). Scope: the 5,236-line universal digital-rights implementation prompt supplied with this project, all repository documentation, migrations, source, tests, container configuration, and CI. A missing subsystem is a release failure, even when a related interface or design note exists. `PASS` means only the stated narrow capability was exercised locally on that historical revision; it does not certify a production deployment.
 
 Every failed area has an implementation path and acceptance check in the [production remediation plan](production-remediation.md).
 

@@ -75,7 +75,11 @@ export class PostgresLicenseService {
     this.trustedTime = trustedTime;
   }
 
-  async issue(request: DatabaseLicenseRequest): Promise<SignedLicense> {
+  async issue(requestValue: DatabaseLicenseRequest): Promise<SignedLicense> {
+    if (!requestValue || typeof requestValue !== 'object') throw new DomainError('INVALID_REQUEST', 'License request required');
+    const snapshot = structuredClone(requestValue);
+    if (typeof snapshot.tenantId !== 'string') throw new DomainError('INVALID_REQUEST', 'Tenant UUID required');
+    const request = { ...snapshot, tenantId: snapshot.tenantId.toLowerCase() };
     return withTenantTransaction(this.pool, request.tenantId, async (client) => {
       // Lock this grant so two concurrent issuances cannot both claim its last device seat.
       const grantResult = await client.query<EntitlementRow>(
@@ -84,7 +88,7 @@ export class PostgresLicenseService {
          JOIN drm.users u ON u.tenant_id = e.tenant_id AND u.id = e.subject_user_id
          JOIN drm.assets a ON a.tenant_id = e.tenant_id AND a.id = e.asset_id
          WHERE e.tenant_id = $1 AND e.id = $2 AND e.subject_user_id = $3
-         FOR UPDATE OF e, u, a`,
+         FOR UPDATE OF e FOR SHARE OF u, a`,
         [request.tenantId, request.entitlementId, request.authenticatedUserId],
       );
       const row = grantResult.rows[0];

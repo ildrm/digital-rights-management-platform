@@ -54,9 +54,12 @@ export class OidcAccessTokenVerifier implements AccessTokenVerifier {
           typeof payload.scope !== 'string' || !payload.scope.split(' ').includes(this.config.requiredScope)) {
         throw new DomainError('UNAUTHENTICATED', 'Required tenant, subject, or scope missing');
       }
-      return { tenantId: payload.tenant_id, externalSubject: payload.sub };
+      return { tenantId: payload.tenant_id.toLowerCase(), externalSubject: payload.sub };
     } catch (error) {
-      if (error instanceof joseErrors.JWKSTimeout || error instanceof TypeError) {
+      if (error instanceof joseErrors.JWKSTimeout || error instanceof TypeError ||
+          error instanceof joseErrors.JOSEError && (
+            error.message === 'Expected 200 OK from the JSON Web Key Set HTTP response' ||
+            error.message === 'Failed to parse the JSON Web Key Set HTTP response as JSON')) {
         throw new DomainError('AUTH_UNAVAILABLE', 'Identity key service is temporarily unavailable');
       }
       throw new DomainError('UNAUTHENTICATED', 'Valid bearer access token required');

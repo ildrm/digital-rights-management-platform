@@ -91,6 +91,7 @@ export class OpenBaoTransitClient {
     try {
       response = await this.request(url, {
         method,
+        redirect: 'manual',
         headers: { 'X-Vault-Token': this.token, ...(payload ? { 'Content-Type': 'application/json' } : {}) },
         ...(payload ? { body: JSON.stringify(payload) } : {}),
         signal: AbortSignal.timeout(3000),
@@ -99,10 +100,15 @@ export class OpenBaoTransitClient {
       throw new DomainError('BAO_UNAVAILABLE', 'OpenBao is unavailable');
     }
     if (!response.ok) {
-      throw new DomainError(response.status >= 500 ? 'BAO_UNAVAILABLE' : 'BAO_DENIED', 'OpenBao rejected the operation');
+      await response.body?.cancel().catch(() => undefined);
+      throw new DomainError(response.status >= 500 || response.status >= 300 && response.status < 400
+        ? 'BAO_UNAVAILABLE' : 'BAO_DENIED', 'OpenBao rejected the operation');
     }
     const length = response.headers.get('content-length');
-    if (length && Number(length) > 16_384) throw new DomainError('BAO_RESPONSE_INVALID', 'OpenBao response is too large');
+    if (length && Number(length) > 16_384) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new DomainError('BAO_RESPONSE_INVALID', 'OpenBao response is too large');
+    }
     let data: unknown;
     try {
       const reader = response.body?.getReader();

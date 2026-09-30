@@ -13,11 +13,11 @@ export class PostgresChallengeStore implements ChallengeStore {
 
   constructor(client: PoolClient, transactionTenantId: string) {
     this.client = client;
-    this.transactionTenantId = transactionTenantId;
+    this.transactionTenantId = transactionTenantId.toLowerCase();
   }
 
   async consume(tenantId: string, deviceId: string, challenge: string): Promise<boolean> {
-    if (tenantId !== this.transactionTenantId) return false;
+    if (typeof tenantId !== 'string' || tenantId.toLowerCase() !== this.transactionTenantId) return false;
     if (challenge.length < 16 || challenge.length > 256) return false;
     const result = await this.client.query(
       `UPDATE drm.device_challenges

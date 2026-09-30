@@ -46,19 +46,16 @@ jobs:
       - name: Migrate disposable database
         env:
           PGPASSWORD: postgres
+          MIGRATION_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/drm_test_ci
         run: |
-          psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d drm_test_ci -f infrastructure/postgres/001_core.sql
-          psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d drm_test_ci -f infrastructure/postgres/002_issuance.sql
-          psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d drm_test_ci -f infrastructure/postgres/003_api_limits.sql
-          psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d drm_test_ci -f infrastructure/postgres/004_device_enrollment.sql
-          psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d drm_test_ci -f infrastructure/postgres/005_outbox.sql
-          psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d drm_test_ci -f infrastructure/postgres/006_asset_packages.sql
-          psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d drm_test_ci -f infrastructure/postgres/007_publish_rate.sql
-          psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d drm_test_ci -f infrastructure/postgres/008_outbox_delivery.sql
-          psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d drm_test_ci -f infrastructure/postgres/009_package_retrieval.sql
+          npm run migrate
+          npm run migrate
+          psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d drm_test_ci -f tests/postgres/core.sql
+          psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d drm_test_ci -f infrastructure/postgres/provision-runtime.sql
           psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d drm_test_ci -c "CREATE ROLE drm_app_test LOGIN PASSWORD 'test-only'"
           psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d drm_test_ci -c "GRANT USAGE ON SCHEMA drm TO drm_app_test"
           psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d drm_test_ci -c "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA drm TO drm_app_test"
+          psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U postgres -d drm_test_ci -c "CREATE ROLE drm_api_test LOGIN PASSWORD 'test-only'; GRANT drm_runtime_api TO drm_api_test; CREATE ROLE drm_worker_test LOGIN PASSWORD 'test-only'; GRANT drm_runtime_worker TO drm_worker_test"
       - name: Start disposable self-hosted providers
         run: |
           docker run -d --rm --name drm-ci-bao -p 127.0.0.1:18200:8200 --entrypoint bao ghcr.io/openbao/openbao:2.7.0@sha256:71156a1c6623a5fa3f5e61b0c6a8ead0faf0df29a778339188443551995d1315 server -dev -dev-root-token-id=dev-only-token -dev-listen-address=0.0.0.0:8200
@@ -86,6 +83,8 @@ jobs:
           PG_TEST_HOST: 127.0.0.1
           PG_TEST_PORT: '5432'
           PG_TEST_USER: drm_app_test
+          PG_RUNTIME_TEST_USER: drm_api_test
+          PG_WORKER_TEST_USER: drm_worker_test
           PGPASSWORD: test-only
         run: npm test
       - name: Stop disposable providers

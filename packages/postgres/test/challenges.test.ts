@@ -37,6 +37,9 @@ test('PostgreSQL challenges are tenant-bound, owner-bound, and consumed once', {
       withTenantTransaction(pool, tenantId, async (client) => new PostgresChallengeStore(client, tenantId).consume(tenantId, deviceId, challenge)),
     ]);
     assert.deepEqual(attempts.sort(), [false, true]);
+    const uppercaseChallenge = await issueDeviceChallenge(pool, tenantId, userId, deviceId);
+    assert.equal(await withTenantTransaction(pool, tenantId, async (client) =>
+      new PostgresChallengeStore(client, tenantId).consume(tenantId.toUpperCase(), deviceId, uppercaseChallenge)), true);
     await issueDeviceChallenge(pool, tenantId, userId, deviceId);
     await issueDeviceChallenge(pool, tenantId, userId, deviceId);
     await issueDeviceChallenge(pool, tenantId, userId, deviceId);

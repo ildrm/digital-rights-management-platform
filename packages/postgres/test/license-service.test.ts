@@ -91,6 +91,45 @@ test('license issuance commits one device-bound license and audit event', { skip
     assert.equal(concurrent.filter((result) => result.status === 'rejected').length, 1);
     const rejected = concurrent.find((result) => result.status === 'rejected');
     if (rejected?.status === 'rejected') assert.equal((rejected.reason as { code?: string }).code, 'ACCESS_DENIED');
+    const independentGrantIds = [randomUUID(), randomUUID()];
+    await withTenantTransaction(pool, tenantId, async (client) => {
+      for (const id of independentGrantIds) await client.query(
+        "INSERT INTO drm.entitlements (tenant_id, id, subject_user_id, asset_id, asset_version, policy_id, policy_version, source, status, valid_from) VALUES ($1, $2, $3, $4, 1, $5, 1, 'free', 'active', '2026-09-01T00:00:00Z')",
+        [tenantId, id, userId, assetId, policyId]);
+    });
+    let entered = 0;
+    let releaseSigners!: () => void;
+    let bothEntered!: () => void;
+    const barrier = new Promise<void>((resolve) => { releaseSigners = resolve; });
+    const reached = new Promise<void>((resolve) => { bothEntered = resolve; });
+    const parallelService = new PostgresLicenseService(pool, {
+      keyId: 'test-signer', async signEd25519(message) {
+        if (++entered === 2) bothEntered();
+        await barrier;
+        return sign(null, message, issuerKeys.privateKey);
+      },
+    }, { async assertActive() {} }, 'integration-test', () => trustedNow);
+    const [firstDeviceChallenge, secondDeviceChallenge] = await Promise.all([
+      issueDeviceChallenge(pool, tenantId, userId, deviceId),
+      issueDeviceChallenge(pool, tenantId, userId, otherDeviceId),
+    ]);
+    const pending = Promise.allSettled([
+      parallelService.issue({ ...request, entitlementId: independentGrantIds[0]!, proof: {
+        challenge: firstDeviceChallenge, signature: sign(null, Buffer.from(firstDeviceChallenge), deviceKeys.privateKey).toString('base64url'),
+      } }),
+      parallelService.issue({ ...request, entitlementId: independentGrantIds[1]!, deviceId: otherDeviceId, proof: {
+        challenge: secondDeviceChallenge, signature: sign(null, Buffer.from(secondDeviceChallenge), deviceKeys.privateKey).toString('base64url'),
+      } }),
+    ]);
+    let timer: NodeJS.Timeout | undefined;
+    const reachedInTime = await Promise.race([
+      reached.then(() => true),
+      new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), 1000); }),
+    ]);
+    if (timer) clearTimeout(timer);
+    releaseSigners();
+    assert.equal(reachedInTime, true, 'Independent grants for one shared asset should reach signing concurrently');
+    assert.equal((await pending).filter((result) => result.status === 'fulfilled').length, 2);
   } finally {
     await pool.end();
   }

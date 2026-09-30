@@ -5,6 +5,7 @@ import { S3CompatiblePackageStore } from '@drm/aws-s3';
 import { OpenBaoKeyWrapper, OpenBaoLicenseSigner, OpenBaoTransitClient, type TenantTransitKeyRing } from '@drm/openbao';
 import { PostgresAssetPublisher, PostgresLicenseService, PostgresPackageReader } from '@drm/postgres';
 import { createPostgresLicenseApi, OidcAccessTokenVerifier } from './index.ts';
+import { armHardStop, endPoolWithin } from './runtime-deadlines.ts';
 
 function required(name: string): string {
   const value = process.env[name];
@@ -49,6 +50,10 @@ async function main(): Promise<void> {
     connectionString: databaseUrl.toString(),
     ssl: { ca, rejectUnauthorized: true },
     max: 10, connectionTimeoutMillis: 3000, idleTimeoutMillis: 30_000,
+    query_timeout: 12_000,
+  });
+  pool.on('error', (error) => {
+    process.stderr.write(JSON.stringify({ event: 'database.idle_client_error', errorName: error.name }) + '\n');
   });
   const bao = new OpenBaoTransitClient(required('OPENBAO_ADDR'), readFileSync(required('OPENBAO_TOKEN_FILE'), 'utf8').trim());
   const signingVersion = Number(required('OPENBAO_SIGNING_KEY_VERSION'));
@@ -88,8 +93,9 @@ async function main(): Promise<void> {
     }),
     publisher: new PostgresAssetPublisher(pool, store, wrapper, signer),
   } : undefined;
+  let shuttingDown = false;
   const server = createPostgresLicenseApi(pool, auth, licenses, publishing,
-    store ? new PostgresPackageReader(pool, store) : undefined);
+    store ? new PostgresPackageReader(pool, store) : undefined, () => shuttingDown);
   try {
     await pool.query('SELECT 1');
     await new Promise<void>((resolve, reject) => {
@@ -108,18 +114,41 @@ async function main(): Promise<void> {
     process.stdout.write(JSON.stringify({ event: 'api.started', host, port }) + '\n');
   } catch (error) {
     s3?.destroy();
-    await pool.end();
+    await endPoolWithin(pool);
     throw error;
   }
-  let shuttingDown = false;
+  let maintenanceRun: Promise<void> | undefined;
+  let tenantCursor = '00000000-0000-0000-0000-000000000000';
+  const reconcile = () => {
+    if (shuttingDown || maintenanceRun || !publishing) return;
+    maintenanceRun = (async () => {
+      const tenants = await pool.query<{ id: string }>('SELECT id FROM drm.tenants WHERE id > $1 ORDER BY id LIMIT 4', [tenantCursor]);
+      tenantCursor = tenants.rows.at(-1)?.id ?? '00000000-0000-0000-0000-000000000000';
+      const results = await Promise.allSettled(tenants.rows.map(async ({ id }) => {
+        const result = await publishing.publisher.reconcile(id, 2);
+        if (result.recovered || result.pending || result.cleaned) process.stdout.write(JSON.stringify({ event: 'publication.reconciled', tenantId: id, ...result }) + '\n');
+      }));
+      for (const result of results) if (result.status === 'rejected') {
+        process.stderr.write(JSON.stringify({ event: 'publication.reconciliation_failed', errorName: result.reason instanceof Error ? result.reason.name : 'UnknownError' }) + '\n');
+      }
+    })().catch((error: unknown) => {
+      process.stderr.write(JSON.stringify({ event: 'publication.discovery_failed', errorName: error instanceof Error ? error.name : 'UnknownError' }) + '\n');
+    }).finally(() => { maintenanceRun = undefined; });
+  };
+  const maintenanceTimer = setInterval(reconcile, 5000);
+  maintenanceTimer.unref();
+  reconcile();
   const shutdown = async () => {
     if (shuttingDown) return;
     shuttingDown = true;
+    clearInterval(maintenanceTimer);
+    armHardStop();
     const force = setTimeout(() => server.closeAllConnections(), 10_000);
     force.unref();
     try {
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
-      await pool.end();
+      await maintenanceRun;
+      await endPoolWithin(pool);
       s3?.destroy();
       process.stdout.write(JSON.stringify({ event: 'api.stopped' }) + '\n');
     } catch (error) {

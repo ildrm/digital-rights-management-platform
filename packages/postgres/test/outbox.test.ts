@@ -31,17 +31,46 @@ test('outbox claims are exclusive, tenant scoped, and acknowledged by lease owne
     ]);
     assert.equal(results.flat().length, 1);
     const owner = results[0]?.length ? 'worker-one' : 'worker-two';
-    assert.equal(results.flat()[0]?.id, eventId);
-    assert.equal(results.flat()[0]?.attempts, 1);
+    const claimed = results.flat()[0];
+    assert.equal(claimed?.id, eventId);
+    assert.equal(claimed?.attempts, 1);
+    assert.match(claimed?.claimToken ?? '', /^[0-9a-f-]{36}$/);
     assert.deepEqual(await claimOutboxEvents(pool, otherTenantId, 'worker-other'), []);
-    assert.equal(await markOutboxDelivered(pool, tenantId, eventId, 'worker-other'), false);
-    assert.equal(await markOutboxDelivered(pool, tenantId, eventId, owner), true);
+    assert.equal(await markOutboxDelivered(pool, tenantId, eventId, 'worker-other', claimed!.claimToken), false);
+    assert.equal(await markOutboxDelivered(pool, tenantId, eventId, owner, claimed!.claimToken), true);
     assert.deepEqual(await claimOutboxEvents(pool, tenantId, 'worker-one'), []);
     const retryId = await withTenantTransaction(pool, tenantId, (client) =>
       appendOutboxEvent(client, tenantId, 'device.revoked', randomUUID(), {}));
-    assert.equal((await claimOutboxEvents(pool, tenantId, 'worker-one', 1))[0]?.id, retryId);
-    assert.equal(await releaseOutboxEvent(pool, tenantId, retryId, 'worker-one', 60), true);
+    const retryClaim = (await claimOutboxEvents(pool, tenantId, 'worker-one', 1))[0];
+    assert.equal(retryClaim?.id, retryId);
+    assert.equal(await releaseOutboxEvent(pool, tenantId, retryId, 'worker-one', retryClaim!.claimToken, 60), true);
     assert.deepEqual(await claimOutboxEvents(pool, tenantId, 'worker-two'), []);
+    const staleId = await withTenantTransaction(pool, tenantId, (client) =>
+      appendOutboxEvent(client, tenantId, 'device.revoked', randomUUID(), {}));
+    const first = (await claimOutboxEvents(pool, tenantId, 'worker-one', 1))[0]!;
+    assert.equal(first.id, staleId);
+    await withTenantTransaction(pool, tenantId, (client) => client.query(
+      "UPDATE drm.outbox_events SET claimed_until = clock_timestamp() - interval '1 second' WHERE tenant_id = $1 AND id = $2",
+      [tenantId, staleId]));
+    const second = (await claimOutboxEvents(pool, tenantId, 'worker-one', 1))[0]!;
+    assert.equal(second.id, staleId);
+    assert.notEqual(second.claimToken, first.claimToken);
+    assert.equal(await markOutboxDelivered(pool, tenantId, staleId, 'worker-one', first.claimToken), false);
+    assert.equal(await markOutboxDelivered(pool, tenantId, staleId, 'worker-one', second.claimToken), true);
+    const crashId = await withTenantTransaction(pool, tenantId, (client) =>
+      appendOutboxEvent(client, tenantId, 'device.revoked', randomUUID(), {}));
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const crashClaim = (await claimOutboxEvents(pool, tenantId, 'worker-one', 1, 60, 2))[0];
+      assert.equal(crashClaim?.id, crashId);
+      await withTenantTransaction(pool, tenantId, (client) => client.query(
+        "UPDATE drm.outbox_events SET claimed_until = clock_timestamp() - interval '1 second' WHERE tenant_id = $1 AND id = $2",
+        [tenantId, crashId]));
+    }
+    assert.deepEqual(await claimOutboxEvents(pool, tenantId, 'worker-one', 1, 60, 2), []);
+    const crashed = await withTenantTransaction(pool, tenantId, (client) => client.query<{ dead_lettered: boolean }>(
+      'SELECT dead_lettered_at IS NOT NULL AS dead_lettered FROM drm.outbox_events WHERE tenant_id = $1 AND id = $2',
+      [tenantId, crashId]));
+    assert.equal(crashed.rows[0]?.dead_lettered, true);
   } finally {
     await pool.end();
   }

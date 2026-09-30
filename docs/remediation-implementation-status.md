@@ -1,0 +1,26 @@
+# Remediation implementation status — 2026-09-30
+
+**Release gate: FAIL.** This is a revision-specific record for the agreed F01–F18 review. “Fixed locally” means the narrow defect has a regression check; it does not establish the full-platform acceptance criteria. The repository documentation remains the requirements baseline until the original specification is available.
+
+| Finding | Status | Implemented evidence and remaining gate |
+| --- | --- | --- |
+| F01 publication consistency | Fixed locally | Migration 013 stages immutable encrypted publication operations before upload. UUID idempotency keys, owner-scoped status, conditional-upload reconciliation, restart recovery, and delayed abandonment cleanup pass PostgreSQL regressions. Production backlog sizing and legacy orphan inventory remain operational gates. |
+| F02 OpenBao redirect credentials | Partial | Redirect following is disabled and checked by unit test. Trusted HA active-node routing and failover behavior remain. |
+| F03 private device PEM | Partial | Enrollment requires canonical public SPKI. Migration 011 revokes suspect devices/licenses, removes the key field, and audits IDs. Operators must inspect legacy records, re-enroll affected users, and address historical backups. |
+| F04 8 MiB upload | Fixed locally | Linear canonical base64 validation; maximum-size and malformed HTTP cases pass. |
+| F05 policy enforcement | Partial | Uninstalled targets fail compatibility and feature constraints fail closed in the evaluator. Full capability/decision contracts, duties, profiles, and client enforcement remain. |
+| F06 mutable license input | Fixed locally | Issuer and PostgreSQL service snapshot inputs before asynchronous work; mutation regression passes. |
+| F07 unwrap buffer | Fixed locally | Caller wipes the actual owned buffer on success and failure; regression passes. |
+| F08 locale-dependent digest | Partial | Lexical ordering and compiler format version 2 are implemented. Cross-language fixtures and checked migration/reissuance for legacy digests remain. |
+| F09 impossible asset version | Fixed locally | Publication rejects a mismatched version before upload; PostgreSQL regression passes. |
+| F10 runtime validation | Partial | OIDC/API UUIDs normalize; challenge comparison and target membership are explicit; core entry-point guards improved. A complete public-input validation audit remains. |
+| F11 provider errors | Partial | Remote JWKS HTTP failure, S3 writes/deletes, and KMS transport errors now have operational categories. Complete provider taxonomy and structured cause metrics remain. |
+| F12 execution bounds | Partial | PostgreSQL statement/lock/client/idle-transaction deadlines, S3/KMS deadlines, stalled-body destruction, HTTP admission limits, and pending-publication quotas added. End-to-end cancellation, distributed capacity limits, and sustained resource qualification remain. |
+| F13 process outages/shutdown | Partial | Both runtimes handle idle pool errors and set query/shutdown deadlines. Transactions handle active connection errors; a real backend termination test proves pool recovery. API readiness withdraws during shutdown. Full process termination and multi-host dependency recovery tests remain. |
+| F14 shared-asset contention | Partial | Grant locks remain exclusive while user/asset status locks are shared; concurrent separate-grant test passes. Signing still occurs in a transaction; 1,000 rps and p95 targets are unproven. |
+| F15 outbox leases | Partial | Migration 010 adds claim fencing; dispatcher claims one event at a time; expired attempts exhaust durably. Lease renewal, event schema versions, and recipient deduplication remain. |
+| F16 maintenance scheduling | Partial | Worker discovers tenants, rotates order, processes four concurrently, and repeats bounded cleanup with backlog logs. Independent maintenance, metrics, and scale qualification remain. |
+| F17 database deployment/integrity | Partial | Runner records checksums under an advisory lock; role guard checks table ownership; migration 012 binds policies/assets/grants/licenses. Separate API/worker role provisioning and restricted-role end-to-end/denied-privilege tests pass. Pre-ledger baseline, expand/backfill/contract automation, retention and deletion procedures remain. |
+| F18 assurance coverage | Partial | CI includes SQL isolation and restricted runtime roles; the disposable integration command passes 33/33 local tests with PostgreSQL, OpenBao, SeaweedFS, and HTTP, with no skips. Hosted CI, live IdP, broader failure campaigns, fuzzing, load, restore, accessibility, client, and certification evidence remain. |
+
+The full documented platform in phases 2–10 remains a release blocker: identity and rights administration; ingestion and catalog; commerce and ownership; customer and creator experiences; protected browser/native clients; certified media and specialist targets; enterprise and remote execution; provenance, privacy, and developer services; and production qualification. Commercial DRM/payment contracts and credentials are external procurement gates. The redundant Compose-host design, replication, failover, off-site recovery, and 99.99% / 1,000-rps / p95-under-500-ms / RPO-5-min / RTO-15-min targets have no deployment evidence yet.

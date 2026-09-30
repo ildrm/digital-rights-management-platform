@@ -24,6 +24,8 @@ test('OIDC verifier rejects wrong audience, missing scope, and untrusted tenant 
       .setAudience(tokenAudience).setSubject('external-user').setIssuedAt().setExpirationTime('10m').sign(privateKey);
   const valid = await makeToken({ tenant_id: tenantId, scope: 'profile drm:license' });
   assert.deepEqual(await verifier.verify(`Bearer ${valid}`), { tenantId, externalSubject: 'external-user' });
+  const uppercaseTenant = await makeToken({ tenant_id: tenantId.toUpperCase(), scope: 'drm:license' });
+  assert.deepEqual(await verifier.verify(`Bearer ${uppercaseTenant}`), { tenantId, externalSubject: 'external-user' });
   const publisherVerifier = new OidcAccessTokenVerifier({ issuer, audience, jwksUrl: `${issuer}jwks`, requiredScope: 'drm:publish' }, keys);
   await assert.rejects(publisherVerifier.verify(`Bearer ${valid}`), { code: 'UNAUTHENTICATED' });
   const creator = await makeToken({ tenant_id: tenantId, scope: 'drm:publish' });
@@ -38,15 +40,28 @@ test('OIDC verifier rejects wrong audience, missing scope, and untrusted tenant 
   const networkFailure = new OidcAccessTokenVerifier({ issuer, audience, jwksUrl: `${issuer}jwks`, requiredScope: 'drm:license' },
     async () => { throw new TypeError('fetch failed'); });
   await assert.rejects(networkFailure.verify(`Bearer ${valid}`), { code: 'AUTH_UNAVAILABLE' });
+  const httpFailure = new OidcAccessTokenVerifier({ issuer, audience, jwksUrl: `${issuer}jwks`, requiredScope: 'drm:license' },
+    async () => { throw new joseErrors.JOSEError('Expected 200 OK from the JSON Web Key Set HTTP response'); });
+  await assert.rejects(httpFailure.verify(`Bearer ${valid}`), { code: 'AUTH_UNAVAILABLE' });
 });
 
 test('HTTP API binds issuance to verified identity and rejects tenant injection', { skip: process.env.API_TEST !== '1' }, async () => {
   const calls: string[] = [];
   let providerUnavailable = false;
+  let holdAuth = false;
+  let heldCount = 0;
+  let releaseAuth!: () => void;
+  let authSaturated!: () => void;
+  const authGate = new Promise<void>((resolve) => { releaseAuth = resolve; });
+  const saturated = new Promise<void>((resolve) => { authSaturated = resolve; });
   const license = { claims: { licenseId: randomUUID() }, signature: 'test', algorithm: 'Ed25519' } as unknown as SignedLicense;
   const server = createLicenseApiServer({
     auth: {
       async verify(header) {
+        if (holdAuth) {
+          if (++heldCount === 2) authSaturated();
+          await authGate;
+        }
         if (header !== 'Bearer valid') throw new DomainError('UNAUTHENTICATED', 'Invalid token');
         calls.push('auth');
         return { tenantId, externalSubject: 'external-user' };
@@ -98,9 +113,11 @@ test('HTTP API binds issuance to verified identity and rejects tenant injection'
       },
     },
     publisher: {
+      async status() { return { status: 'pending' }; },
       async publish(input) {
         assert.deepEqual([input.tenantId, input.ownerUserId, input.mimeType], [tenantId, userId, 'application/pdf']);
-        assert.equal(input.content.toString(), 'creator bytes');
+        if (input.content.length === 8 * 1024 * 1024) assert.equal(input.content[0], 65);
+        else assert.equal(input.content.toString(), 'creator bytes');
         assert.deepEqual(input.policy.permissions, ['read']);
         calls.push('publish');
         return { assetId: randomUUID(), policyId: randomUUID(), renditionId: randomUUID(),
@@ -115,14 +132,14 @@ test('HTTP API binds issuance to verified identity and rejects tenant injection'
         return Buffer.from('{"ciphertext":"test"}');
       },
     },
-  });
+  }, { maxInFlight: 2, maxLargeTransfers: 1 });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   try {
     const address = server.address();
     if (!address || typeof address === 'string') throw new Error('No test listener');
     const url = `http://127.0.0.1:${address.port}`;
     const post = (path: string, body: unknown, token = 'Bearer valid') => fetch(`${url}${path}`, {
-      method: 'POST', headers: { Authorization: token, 'Content-Type': 'application/json' },
+      method: 'POST', headers: { Authorization: token, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() },
       body: JSON.stringify(body),
     });
     const missingAuth = await post('/v1/device-challenges', { deviceId }, 'Bearer invalid');
@@ -169,6 +186,12 @@ test('HTTP API binds issuance to verified identity and rejects tenant injection'
     assert.equal(publishResponse.status, 201);
     assert.equal((await publishResponse.json()).asset.version, 1);
     assert.deepEqual(calls.slice(-4), ['publish-auth', 'user', 'asset-publish', 'publish']);
+    const maxSizeResponse = await post('/v1/assets', {
+      ...publishBody, contentBase64: Buffer.alloc(8 * 1024 * 1024, 65).toString('base64'),
+    }, 'Bearer creator');
+    assert.equal(maxSizeResponse.status, 201, await maxSizeResponse.clone().text());
+    const malformedResponse = await post('/v1/assets', { ...publishBody, contentBase64: 'A==A' }, 'Bearer creator');
+    assert.equal(malformedResponse.status, 400);
     const packagePath = `/v1/assets/${assetId}/renditions/${renditionId}/package`;
     const deniedPackage = await fetch(`${url}${packagePath}`, { headers: { Authorization: 'Bearer invalid',
       'X-DRM-License-ID': license.claims.licenseId } });
@@ -181,6 +204,19 @@ test('HTTP API binds issuance to verified identity and rejects tenant injection'
     assert.equal(packageResponse.headers.get('cache-control'), 'no-store');
     assert.equal(await packageResponse.text(), '{"ciphertext":"test"}');
     assert.deepEqual(calls.slice(-4), ['auth', 'user', 'asset-fetch', 'package-read']);
+    const operationResponse = await fetch(`${url}/v1/publication-operations/${randomUUID()}`, { headers: { Authorization: 'Bearer creator' } });
+    assert.equal(operationResponse.status, 200);
+    assert.deepEqual(await operationResponse.json(), { operation: { status: 'pending' } });
+    const missingKey = await fetch(`${url}/v1/assets`, { method: 'POST', headers: { Authorization: 'Bearer creator', 'Content-Type': 'application/json' }, body: JSON.stringify(publishBody) });
+    assert.equal(missingKey.status, 400);
+    holdAuth = true;
+    const heldRequests = [post('/v1/device-challenges', { deviceId }), post('/v1/device-challenges', { deviceId })];
+    await saturated;
+    const overload = await post('/v1/device-challenges', { deviceId });
+    assert.equal(overload.status, 503);
+    assert.equal((await overload.json()).error, 'CAPACITY_EXCEEDED');
+    releaseAuth();
+    assert.ok((await Promise.all(heldRequests)).every((response) => response.status === 201));
   } finally {
     server.closeAllConnections();
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));

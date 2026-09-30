@@ -22,7 +22,7 @@ export interface LicenseApiDependencies {
   readonly revokeDevice: (tenantId: string, userId: string, deviceId: string) => Promise<void>;
   readonly licenses: Pick<PostgresLicenseService, 'issue'>;
   readonly publishAuth?: AccessTokenVerifier;
-  readonly publisher?: Pick<PostgresAssetPublisher, 'publish'>;
+  readonly publisher?: Pick<PostgresAssetPublisher, 'publish' | 'status'>;
   readonly packageReader?: Pick<PostgresPackageReader, 'read'>;
   readonly ready?: () => Promise<void>;
   readonly logError?: (event: { requestId: string; errorName: string }) => void;
@@ -32,6 +32,7 @@ export function createPostgresLicenseApi(
   pool: Pool, auth: AccessTokenVerifier, licenses: PostgresLicenseService,
   publishing?: { auth: AccessTokenVerifier; publisher: PostgresAssetPublisher },
   packageReader?: PostgresPackageReader,
+  isDraining: () => boolean = () => false,
 ): Server {
   return createLicenseApiServer({
     auth,
@@ -55,7 +56,10 @@ export function createPostgresLicenseApi(
     licenses,
     ...(publishing ? { publishAuth: publishing.auth, publisher: publishing.publisher } : {}),
     ...(packageReader ? { packageReader } : {}),
-    ready: async () => { await pool.query('SELECT 1'); },
+    ready: async () => {
+      if (isDraining()) throw new DomainError('NOT_READY', 'API is draining');
+      await pool.query('SELECT 1');
+    },
   });
 }
 
@@ -98,8 +102,19 @@ function publishingBody(body: Record<string, unknown>): Pick<PublishAssetInput, 
   exactFields(body, ['contentBase64', 'mimeType', 'policy']);
   const encoded = body.contentBase64;
   if (typeof encoded !== 'string' || encoded.length < 4 || encoded.length > Math.ceil(MAX_PUBLISH_CONTENT_BYTES / 3) * 4 ||
-      !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded)) {
+      encoded.length % 4 !== 0) {
     throw new DomainError('INVALID_REQUEST', 'Valid bounded base64 asset content required');
+  }
+  let padding = 0;
+  if (encoded.endsWith('==')) padding = 2;
+  else if (encoded.endsWith('=')) padding = 1;
+  for (let index = 0; index < encoded.length; index++) {
+    const char = encoded.charCodeAt(index);
+    if (index >= encoded.length - padding ? char !== 61 :
+      !((char >= 65 && char <= 90) || (char >= 97 && char <= 122) ||
+        (char >= 48 && char <= 57) || char === 43 || char === 47)) {
+      throw new DomainError('INVALID_REQUEST', 'Valid bounded base64 asset content required');
+    }
   }
   const content = Buffer.from(encoded, 'base64');
   if (content.length < 1 || content.length > MAX_PUBLISH_CONTENT_BYTES || content.toString('base64') !== encoded ||
@@ -117,7 +132,7 @@ function exactFields(value: Record<string, unknown>, required: readonly string[]
 
 function uuid(value: unknown): string {
   if (typeof value !== 'string' || !UUID.test(value)) throw new DomainError('INVALID_REQUEST', 'UUID field required');
-  return value;
+  return value.toLowerCase();
 }
 
 function oneUuidHeader(request: IncomingMessage, name: string): string {
@@ -191,6 +206,11 @@ function sendJson(response: ServerResponse, status: number, body: Record<string,
 function errorStatus(error: DomainError): number {
   if (error.code === 'UNAUTHENTICATED') return 401;
   if (error.code === 'AUTH_UNAVAILABLE') return 503;
+  if (error.code === 'DATABASE_UNAVAILABLE') return 503;
+  if (error.code === 'PUBLISH_UNCERTAIN') return 503;
+  if (error.code === 'IDEMPOTENCY_CONFLICT' || error.code === 'PUBLICATION_ABANDONED') return 409;
+  if (error.code === 'PUBLICATION_NOT_FOUND') return 404;
+  if (error.code === 'PUBLICATION_CAPACITY') return 429;
   if (error.code.startsWith('BAO_') || error.code.startsWith('KMS_') ||
       error.code === 'INVALID_BAO_KEY' || error.code === 'INVALID_BAO_CONFIG' ||
       error.code.startsWith('STORAGE_') || error.code.startsWith('INVALID_STORAGE_') ||
@@ -201,9 +221,43 @@ function errorStatus(error: DomainError): number {
   return 403;
 }
 
-export function createLicenseApiServer(dependencies: LicenseApiDependencies): Server {
+function databaseUnavailable(error: unknown): boolean {
+  if (!error || typeof error !== 'object' || !('code' in error) || typeof error.code !== 'string') return false;
+  return error.code.startsWith('08') || ['ECONNREFUSED', 'ECONNRESET', 'EPIPE', 'ETIMEDOUT', '53300', '57P01', '57014'].includes(error.code);
+}
+
+export function createLicenseApiServer(dependencies: LicenseApiDependencies,
+  limits: { maxInFlight: number; maxLargeTransfers: number } = { maxInFlight: 16, maxLargeTransfers: 2 }): Server {
+  if (!Number.isSafeInteger(limits.maxInFlight) || limits.maxInFlight < 1 || limits.maxInFlight > 256 ||
+      !Number.isSafeInteger(limits.maxLargeTransfers) || limits.maxLargeTransfers < 1 || limits.maxLargeTransfers > limits.maxInFlight) {
+    throw new DomainError('INVALID_REQUEST', 'Invalid HTTP concurrency limits');
+  }
+  let inFlight = 0;
+  let largeTransfers = 0;
   const server = createServer((request, response) => {
     const requestId = randomUUID();
+    const largeTransfer = request.method === 'POST' && request.url === '/v1/assets' ||
+      request.method === 'GET' && /^\/v1\/assets\/[^/]+\/renditions\/[^/]+\/package$/.test(request.url ?? '');
+    if (inFlight >= limits.maxInFlight || largeTransfer && largeTransfers >= limits.maxLargeTransfers) {
+      response.setHeader('Retry-After', '1');
+      response.setHeader('Connection', 'close');
+      sendJson(response, 503, { error: 'CAPACITY_EXCEEDED' }, requestId);
+      return;
+    }
+    inFlight++;
+    if (largeTransfer) largeTransfers++;
+    let operationDone = false;
+    let responseDone = false;
+    let released = false;
+    const release = () => {
+      if (released || !operationDone || !responseDone) return;
+      released = true;
+      inFlight--;
+      if (largeTransfer) largeTransfers--;
+    };
+    const completeResponse = () => { responseDone = true; release(); };
+    response.once('finish', completeResponse);
+    response.once('close', completeResponse);
     void (async () => {
       const url = new URL(request.url ?? '/', 'http://localhost');
       if (request.method === 'GET' && url.pathname === '/health/live' && !url.search) {
@@ -227,12 +281,19 @@ export function createLicenseApiServer(dependencies: LicenseApiDependencies): Se
       ].includes(url.pathname);
       const publishRoute = request.method === 'POST' && url.pathname === '/v1/assets' &&
         dependencies.publishAuth !== undefined && dependencies.publisher !== undefined;
-      if (url.search || (!postRoute && !revokeMatch && !publishRoute && !packageMatch)) {
+      const publicationStatus = request.method === 'GET' && dependencies.publisher && dependencies.publishAuth
+        ? /^\/v1\/publication-operations\/([^/]+)$/.exec(url.pathname) : null;
+      if (url.search || (!postRoute && !revokeMatch && !publishRoute && !packageMatch && !publicationStatus)) {
         sendJson(response, 404, { error: 'NOT_FOUND' }, requestId);
         return;
       }
-      const principal = await (publishRoute ? dependencies.publishAuth! : dependencies.auth).verify(oneAuthorizationHeader(request));
+      const principal = await (publishRoute || publicationStatus ? dependencies.publishAuth! : dependencies.auth).verify(oneAuthorizationHeader(request));
       const userId = await dependencies.resolveUser(principal.tenantId, principal.externalSubject);
+      if (publicationStatus) {
+        const operation = await dependencies.publisher!.status(principal.tenantId, userId, uuid(publicationStatus[1]));
+        sendJson(response, 200, { operation }, requestId);
+        return;
+      }
       if (publishRoute) await dependencies.consumeRate(principal.tenantId, userId, 'asset-publish');
       if (packageMatch) {
         await dependencies.consumeRate(principal.tenantId, userId, 'asset-fetch');
@@ -261,7 +322,8 @@ export function createLicenseApiServer(dependencies: LicenseApiDependencies): Se
       if (publishRoute) {
         const input = publishingBody(body);
         try {
-          const published = await dependencies.publisher!.publish({ tenantId: principal.tenantId, ownerUserId: userId, ...input });
+          const idempotencyKey = oneUuidHeader(request, 'idempotency-key');
+          const published = await dependencies.publisher!.publish({ tenantId: principal.tenantId, ownerUserId: userId, idempotencyKey, ...input });
           sendJson(response, 201, { asset: published }, requestId);
         } finally {
           input.content.fill(0);
@@ -306,9 +368,13 @@ export function createLicenseApiServer(dependencies: LicenseApiDependencies): Se
       const event = { requestId, errorName: error instanceof Error ? error.name : 'UnknownError' };
       if (dependencies.logError) dependencies.logError(event);
       else process.stderr.write(`${JSON.stringify({ event: 'api.error', ...event })}\n`);
-      sendJson(response, 500, { error: 'INTERNAL_ERROR' }, requestId);
-    });
+      if (databaseUnavailable(error)) {
+        response.setHeader('Retry-After', '1');
+        sendJson(response, 503, { error: 'DATABASE_UNAVAILABLE' }, requestId);
+      } else sendJson(response, 500, { error: 'INTERNAL_ERROR' }, requestId);
+    }).finally(() => { operationDone = true; release(); });
   });
+  server.maxConnections = 256;
   server.maxHeadersCount = 50;
   server.headersTimeout = 10_000;
   server.requestTimeout = 10_000;

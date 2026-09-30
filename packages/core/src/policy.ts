@@ -51,7 +51,7 @@ export interface CompatibilityReport {
 }
 
 export interface CompiledPolicy {
-  readonly formatVersion: 1;
+  readonly formatVersion: 2;
   readonly target: Target;
   readonly policyId: string;
   readonly policyVersion: number;
@@ -118,8 +118,8 @@ export function validatePolicy(policy: Policy): void {
 
 export function analyzeCompatibility(policy: Policy, target: Target): CompatibilityReport {
   validatePolicy(policy);
+  requireValue(typeof target === 'string' && Object.hasOwn(capabilities, target), 'INVALID_TARGET', 'Unknown enforcement target');
   const support = capabilities[target];
-  requireValue(support, 'INVALID_TARGET', 'Unknown enforcement target');
   const allowed = policy.permissions.filter((action) => !policy.prohibitions.includes(action));
   const unsupportedActions = allowed.filter((action) => !support.actions.includes(action));
   const unsupportedConstraints = (Object.keys(policy.constraints) as ConstraintKey[]).filter((key) => !support.constraints.includes(key));
@@ -127,7 +127,7 @@ export function analyzeCompatibility(policy: Policy, target: Target): Compatibil
     ...unsupportedActions.map((action) => `${target} cannot enforce action ${action}`),
     ...unsupportedConstraints.map((key) => `${target} cannot enforce constraint ${key}`),
   ];
-  if (target === 'widevine' || target === 'fairplay' || target === 'playready') explanations.push(`${target} provider adapter and certification are not installed`);
+  if (target !== 'secureViewer') explanations.push(`${target} enforcement adapter and certification are not installed`);
   if (policy.profile === 'maximum' && target !== 'remoteExecution') explanations.push('Maximum protection requires remote execution');
   if (policy.profile === 'highSecurity' && policy.constraints.minimumDeviceTrust !== 'hardware') explanations.push('High security requires hardware device trust');
   return { target, compatible: explanations.length === 0, unsupportedActions, unsupportedConstraints, explanations };
@@ -137,15 +137,16 @@ export function compilePolicy(policy: Policy, target: Target): CompiledPolicy {
   const report = analyzeCompatibility(policy, target);
   if (!report.compatible) throw new DomainError('UNSUPPORTED_POLICY', report.explanations.join('; '));
   const allowedActions = [...policy.permissions].sort();
-  const constraints = Object.fromEntries(Object.entries(policy.constraints).sort(([a], [b]) => a.localeCompare(b))) as Constraints;
-  const duties = [...policy.duties].sort((a, b) => `${a.type}:${a.reference}`.localeCompare(`${b.type}:${b.reference}`));
+  const compare = (a: string, b: string): number => a < b ? -1 : a > b ? 1 : 0;
+  const constraints = Object.fromEntries(Object.entries(structuredClone(policy.constraints)).sort(([a], [b]) => compare(a, b))) as Constraints;
+  const duties = policy.duties.map((duty) => ({ ...duty })).sort((a, b) => compare(`${a.type}:${a.reference}`, `${b.type}:${b.reference}`));
   const canonical = canonicalJson({
     id: policy.id, version: policy.version, tenantId: policy.tenantId, assetId: policy.assetId,
     profile: policy.profile, allowedActions, prohibitions: [...policy.prohibitions].sort(),
     constraints, duties, preventOriginalPossession: policy.preventOriginalPossession,
   });
   return {
-    formatVersion: 1, target, policyId: policy.id, policyVersion: policy.version,
+    formatVersion: 2, target, policyId: policy.id, policyVersion: policy.version,
     tenantId: policy.tenantId, assetId: policy.assetId, profile: policy.profile,
     allowedActions, constraints, duties, sourceDigest: createHash('sha256').update(canonical).digest('hex'),
   };

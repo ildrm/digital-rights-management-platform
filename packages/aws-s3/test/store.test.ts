@@ -74,3 +74,25 @@ test('S3-compatible self-hosted object storage accepts client-encrypted packages
   const pkg = { manifest: { identity: { tenantId, assetId, renditionId, assetVersion: '1' } } } as unknown as SecurePackage;
   assert.match((await store.put(key, pkg)).sha256, /^[a-f0-9]{64}$/);
 });
+
+test('S3 store bounds failed writes and closes rejected read bodies', async () => {
+  const pkg = { manifest: { identity: { tenantId, assetId, renditionId, assetVersion: '1' } } } as unknown as SecurePackage;
+  const failed = new S3CompatiblePackageStore({ async send(_command: unknown, options: { abortSignal?: AbortSignal }) {
+    assert.ok(options.abortSignal);
+    throw new Error('provider unavailable');
+  } } as unknown as S3Client, 'private-packages');
+  await assert.rejects(failed.put(key, pkg), { code: 'STORAGE_UNAVAILABLE' });
+  await assert.rejects(failed.delete(key), { code: 'STORAGE_UNAVAILABLE' });
+  const body = Readable.from([Buffer.from('bad')]);
+  const store = new S3CompatiblePackageStore({ async send() {
+    return { ContentLength: 3, Body: body };
+  } } as unknown as S3Client, 'private-packages');
+  await assert.rejects(store.get(key, 'a'.repeat(64), 4), { code: 'INVALID_STORAGE_CONTENT' });
+  assert.equal(body.destroyed, true);
+  const stalled = new Readable({ read() {} });
+  const timedStore = new S3CompatiblePackageStore({ async send() {
+    return { ContentLength: 4, Body: stalled };
+  } } as unknown as S3Client, 'private-packages', undefined, 20);
+  await assert.rejects(timedStore.get(key, 'a'.repeat(64), 4), { code: 'STORAGE_UNAVAILABLE' });
+  assert.equal(stalled.destroyed, true);
+});

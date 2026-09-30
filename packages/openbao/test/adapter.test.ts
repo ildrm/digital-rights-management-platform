@@ -17,6 +17,7 @@ test('OpenBao Transit signs pinned Ed25519 digests and binds wrapped keys to ten
     const url = new URL(String(input));
     assert.equal(url.origin, 'https://bao.test');
     assert.equal(new Headers(init?.headers).get('X-Vault-Token'), 'test-token');
+    assert.equal(init?.redirect, 'manual');
     paths.push(url.pathname);
     const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
     const reply = (data: Record<string, unknown>, status = 200) => new Response(JSON.stringify({ data }), {
@@ -83,4 +84,9 @@ test('OpenBao Transit refuses non-TLS external endpoints and mismatched signing 
   }))) as typeof fetch;
   const bounded = new OpenBaoTransitClient('https://bao.test/', 'token', oversized);
   await assert.rejects(bounded.readKey('signer'), { code: 'BAO_RESPONSE_INVALID' });
+  const redirected = new OpenBaoTransitClient('https://bao.test/', 'token', (async (_input, init) => {
+    assert.equal(init?.redirect, 'manual');
+    return new Response(null, { status: 307, headers: { location: 'https://attacker.test/steal' } });
+  }) as typeof fetch);
+  await assert.rejects(redirected.readKey('signer'), { code: 'BAO_UNAVAILABLE' });
 });

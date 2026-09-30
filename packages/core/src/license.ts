@@ -103,22 +103,37 @@ export class LicenseIssuer {
   private readonly trustedTime: () => string;
 
   constructor(signer: LicenseSigner, challenges: ChallengeStore, trustedTime: () => string) {
-    requireValue(signer.keyId.length > 0, 'INVALID_SIGNING_KEY', 'Signing key reference required');
+    requireValue(signer !== null && typeof signer === 'object' && typeof signer.keyId === 'string' && signer.keyId.length > 0 &&
+      typeof signer.signEd25519 === 'function', 'INVALID_SIGNING_KEY', 'Signing key reference required');
+    requireValue(challenges !== null && typeof challenges === 'object' && typeof challenges.consume === 'function' &&
+      typeof trustedTime === 'function', 'INVALID_ISSUER', 'Challenge store and trusted clock required');
     this.signer = signer;
     this.challenges = challenges;
     this.trustedTime = trustedTime;
   }
 
-  async issue(input: IssueLicenseInput): Promise<SignedLicense> {
+  async issue(inputValue: IssueLicenseInput): Promise<SignedLicense> {
+    requireValue(inputValue !== null && typeof inputValue === 'object' && !Array.isArray(inputValue),
+      'INVALID_REQUEST', 'License request required');
+    const input = structuredClone(inputValue);
     const trustedNow = this.trustedTime();
     const decision = evaluateAccess({ ...input, context: { ...input.context, now: trustedNow } });
     if (!decision.allowed) throw new DomainError('ACCESS_DENIED', decision.reasons.join('; '));
     requireValue(input.context.online, 'ONLINE_REQUIRED', 'Issuance requires online authorization');
     requireValue(Number.isSafeInteger(input.requestedSeconds) && input.requestedSeconds > 0 && input.requestedSeconds <= 3600, 'INVALID_DURATION', 'License duration must be 1–3600 seconds');
-    requireValue(input.keyReference.length > 0 && input.issuer.length > 0, 'INVALID_ISSUER', 'Issuer and key reference required');
-    requireValue(input.deviceProof.challenge.length >= 16 && input.deviceProof.challenge.length <= 256 && input.deviceProof.signature.length <= 256, 'DEVICE_PROOF_INVALID', 'Invalid device proof encoding');
+    requireValue(typeof input.keyReference === 'string' && input.keyReference.length > 0 &&
+      typeof input.issuer === 'string' && input.issuer.length > 0, 'INVALID_ISSUER', 'Issuer and key reference required');
+    requireValue(input.deviceProof !== null && typeof input.deviceProof === 'object' &&
+      typeof input.deviceProof.challenge === 'string' && input.deviceProof.challenge.length >= 16 &&
+      input.deviceProof.challenge.length <= 256 && typeof input.deviceProof.signature === 'string' &&
+      input.deviceProof.signature.length <= 256, 'DEVICE_PROOF_INVALID', 'Invalid device proof encoding');
     const proof = Buffer.from(input.deviceProof.signature, 'base64url');
-    const validProof = verify(null, Buffer.from(input.deviceProof.challenge, 'utf8'), input.device.publicKeyPem, proof);
+    let validProof = false;
+    try {
+      validProof = verify(null, Buffer.from(input.deviceProof.challenge, 'utf8'), input.device.publicKeyPem, proof);
+    } catch {
+      throw new DomainError('DEVICE_PROOF_INVALID', 'Device public key or signature is invalid');
+    }
     requireValue(validProof, 'DEVICE_PROOF_INVALID', 'Device signature is invalid');
     requireValue(await this.challenges.consume(input.device.tenantId, input.device.id, input.deviceProof.challenge), 'DEVICE_PROOF_REPLAY', 'Device challenge is expired or already consumed');
     const issued = Date.parse(trustedNow);
@@ -139,6 +154,7 @@ export class LicenseIssuer {
       keyReference: input.keyReference, nonce: randomUUID(), issuer: input.issuer,
       signingKeyId: this.signer.keyId,
     };
+    requireValue(validClaims(claims), 'INVALID_LICENSE_CLAIMS', 'Issuer produced invalid license claims');
     const signature = await this.signer.signEd25519(signingMessage(claims));
     requireValue(signature.length === 64, 'INVALID_SIGNATURE', 'Ed25519 signature must be 64 bytes');
     return { claims, signature: signature.toString('base64url'), algorithm: 'Ed25519' };
