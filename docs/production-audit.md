@@ -28,7 +28,7 @@ Every failed area has an implementation path and acceptance check in the [produc
 | Secure viewer and protected local execution | FAIL | Protected consumer clients, trusted time, rollback detection, output policy, native key storage and anti-tamper tests. A server-side chunk opener is only a primitive. |
 | Software, fonts, games, CAD, datasets and AI models | FAIL | Type-specific licensing, SDKs, execution controls, protected delivery and usage accounting. |
 | Remote execution and maximum protection | FAIL | Isolated compute, session brokering, streaming, secret handling, billing and abuse controls. |
-| Marketplace, commerce, subscriptions and tax | FAIL | Checkout, payment reconciliation, order state machine, ledger, invoices, refunds, tax and payout workflows. No payment provider account or integration exists. |
+| Marketplace, commerce, subscriptions and tax | FAIL | Hosted Checkout, immutable one-time orders, reconciliation, purchase grants, and gross-sale journals now have local tests. Subscriptions, fees, invoices, refunds, disputes, tax, payouts, and real provider qualification remain missing; no gateway account is available. |
 | Royalties and rights chain | FAIL | Split agreements, append-only royalty ledger, settlement, ownership evidence and disputes. |
 | Creator studio, customer library and cross-device state | FAIL | All responsive user interfaces and corresponding workflows. |
 | Offline access and lending | FAIL | Native lease storage, trusted time, offline revocation bounds, return/lending state and institutional controls. |
@@ -45,7 +45,7 @@ Every failed area has an implementation path and acceptance check in the [produc
 | --- | --- | --- |
 | Security assurance | FAIL | Independent review, penetration tests, parser fuzzing, hardware trust, key compromise drills and live provider threat tests. |
 | Durable deployment | FAIL | Production OpenBao seal/storage, SeaweedFS replication, hardened PostgreSQL, OIDC, TLS gateway, network policy and deployment manifests. |
-| Backups and disaster recovery | FAIL | Automated backup, restore proof, RPO/RTO measurement, failover and rollback tests. |
+| Backups and disaster recovery | FAIL | Encrypted standalone Docker backups and isolated data/key recovery pass locally. Off-host recovery, production RPO/RTO, failover/fencing, continuous WAL archiving, and rollback qualification remain open. |
 | Observability and response | FAIL | Metrics, tracing, dashboards, alerts, audit retention, incident exercises and runbooks. |
 | Outbox delivery | FAIL | A separate signed HTTPS worker, capped retry, dead-letter state and explicit requeue now pass local tests. No production destination, deployed worker, consumer idempotency proof or alert has been verified. |
 | Data lifecycle | FAIL | Tenant-scoped bounded rate-window and challenge cleanup is implemented and tested; orphan-object reconciliation, retention schedules and privacy deletion remain. |

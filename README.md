@@ -24,7 +24,9 @@ A separate outbox worker can deliver these events to a configured HTTPS recipien
 
 `LOCAL_NO_DOCKER=1 npm run test:integration` runs the PostgreSQL and HTTP checks plus an isolated PostgreSQL snapshot restore drill when Docker is unavailable. `npm run load:test -- <URL> <seconds> <concurrency>` measures bounded health or catalog traffic and reports latency and errors. The [deployment notes](docs/deployment.md) describe inputs and the limits of both checks.
 
-The Stripe adapter follows PaymentIntent and signed-webhook flows but has no activated checkout, order/entitlement workflow, or real provider test. No Stripe account is required to run the standalone evaluation stack.
+The [commerce and administration APIs](docs/commerce.md) implement immutable offers, hosted Stripe Checkout orders, verified payment settlement, purchase grants, sale journals, tenant subject provisioning, free/organization/trial grants, and account suspension/revocation. Payments remain disabled without credentials; no Stripe account is needed for standalone administration or free access. Refunds, subscriptions, tax, payout reconciliation, and real provider qualification remain incomplete.
+
+The optional Docker backup job encrypts PostgreSQL and standalone recovery keys together. An isolated Docker recovery has verified customer authentication, library, licensing, package retrieval, and content integrity. See the [backup and recovery runbook](docs/backup-recovery.md); off-host recovery, HA, and production RPO/RTO remain unqualified.
 
 ## Structure
 
@@ -35,7 +37,7 @@ The Stripe adapter follows PaymentIntent and signed-webhook flows but has no act
 - `packages/openbao/src`: optional signing and content-key wrapping adapter
 - `packages/api/src/local-keys.ts`: standalone signing and key wrapping
 - `packages/postgres/src/object-store.ts`: encrypted package storage in PostgreSQL
-- `packages/payments/src`: Stripe PaymentIntent and webhook adapter
+- `packages/payments/src`: Stripe hosted Checkout, PaymentIntent, and signed webhook adapters
 - `packages/aws-s3/src`: S3-protocol encrypted package storage adapter, tested with SeaweedFS
 - `packages/aws-kms/src`: optional AWS adapter, inactive in the API runtime
 - `infrastructure/postgres/006_asset_packages.sql`: immutable, tenant-scoped package catalog

@@ -25,7 +25,7 @@ docker compose -f compose.standalone.yaml run --rm operator node --experimental-
 Record the returned tenant UUID. The operator can issue a five-minute access token for that subject with:
 
 ```sh
-docker compose -f compose.standalone.yaml run --rm operator node --experimental-strip-types scripts/issue-local-token.ts /run/secrets/auth-signing drm-local drm-api TENANT_UUID operator-1 'drm:license drm:publish'
+docker compose -f compose.standalone.yaml run --rm operator node --experimental-strip-types scripts/issue-local-token.ts /run/secrets/auth-signing drm-local drm-api TENANT_UUID operator-1 'drm:license drm:publish drm:admin'
 ```
 
 Run the authenticated publish/idempotency/catalog smoke test with an existing tenant UUID and subject:
@@ -34,7 +34,7 @@ Run the authenticated publish/idempotency/catalog smoke test with an existing te
 node --experimental-strip-types scripts/smoke-standalone.ts TENANT_UUID operator-1
 ```
 
-The API still requires a device enrollment and an entitlement before it can issue a license. The token command is an administrative test path, not customer registration or MFA. Do not expose port 8080 beyond loopback. A public deployment needs TLS termination and a complete identity and account recovery design. Do not place the operator container or its private key on the public network.
+New operator tenants receive explicit admin/creator/customer roles. Existing tenants need `scripts/bootstrap-admin-role.ts` before using administration. The [administration API](commerce.md) provisions subjects and free/organization/trial grants; the API still requires device enrollment and an entitlement to issue a license. The token command is an administrative test path, not customer registration or MFA. Do not expose port 8080 beyond loopback. A public deployment needs TLS termination and a complete identity and account recovery design. Do not place the operator container or its private key on the public network.
 
 Do not regenerate `.secrets/standalone` while its PostgreSQL volume contains data. Keep the database passwords, signing key, wrapping key, and CA trust material together in the backup/recovery plan.
 
@@ -42,7 +42,7 @@ Do not regenerate `.secrets/standalone` while its PostgreSQL volume contains dat
 
 [`compose.standalone.yaml`](../compose.standalone.yaml) pins the Node and PostgreSQL image versions, uses a private Docker network, a persistent database volume, Docker secrets, a one-shot migration job, readiness checks, and restart policies. The app image runs as UID 1000. The PostgreSQL entrypoint copies its secret key into a PostgreSQL-owned, mode-0600 file before enabling TLS. The generated CA certificate expires in one year; renew it and coordinate server/client trust before expiry. Database and key material need off-host encrypted backups and restore exercises.
 
-`PACKAGE_STORE=postgres` avoids an S3 service. Optional S3, OpenBao, and remote OIDC modes remain in [`api.env.example`](../config/api.env.example) for existing integrations, but their community deployments have not been established as compliant with the formal-LTS requirement. The outbox worker requires an actual HTTPS recipient and is not started in this Compose file. Payment processing requires a Stripe account and is not activated by this deployment.
+`PACKAGE_STORE=postgres` avoids an S3 service. Optional S3, OpenBao, and remote OIDC modes remain in [`api.env.example`](../config/api.env.example) for existing integrations, but their community deployments have not been established as compliant with the formal-LTS requirement. The outbox worker requires an actual HTTPS recipient and is not started in this Compose file. Payment processing requires a Stripe account and is disabled by default; the [commerce guide](commerce.md) documents activation and remaining billing gates. Enable the optional `backup` profile to schedule encrypted Docker backups; see [backup and recovery](backup-recovery.md).
 
 ## Local checks and evidence
 

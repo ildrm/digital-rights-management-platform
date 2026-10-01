@@ -3,7 +3,8 @@ import { S3Client } from '@aws-sdk/client-s3';
 import pg from 'pg';
 import { S3CompatiblePackageStore } from '@drm/aws-s3';
 import { OpenBaoKeyWrapper, OpenBaoLicenseSigner, OpenBaoTransitClient, type TenantTransitKeyRing } from '@drm/openbao';
-import { PostgresAssetPublisher, PostgresLicenseService, PostgresPackageReader, PostgresPackageStore, type ProtectedPackageStore } from '@drm/postgres';
+import { PostgresAdministrationService, PostgresAssetPublisher, PostgresCommerceService, PostgresLicenseService, PostgresPackageReader, PostgresPackageStore, type ProtectedPackageStore } from '@drm/postgres';
+import { StripeCheckoutGateway } from '@drm/payments';
 import { createPostgresLicenseApi, LocalAccessTokenVerifier, OidcAccessTokenVerifier } from './index.ts';
 import { LocalKeyWrapper, LocalLicenseSigner } from './local-keys.ts';
 import { armHardStop, endPoolWithin } from './runtime-deadlines.ts';
@@ -117,9 +118,16 @@ async function main(): Promise<void> {
     auth: makeAuth('drm:publish'),
     publisher: new PostgresAssetPublisher(pool, store, wrapper, signer),
   } : undefined;
+  const paymentProvider = process.env.PAYMENT_PROVIDER ?? 'none';
+  if (!['none', 'stripe'].includes(paymentProvider)) throw new Error('PAYMENT_PROVIDER must be none or stripe');
+  const paymentGateway = paymentProvider === 'stripe' ? new StripeCheckoutGateway(
+    readFileSync(required('STRIPE_SECRET_KEY_FILE'), 'utf8').trim(), readFileSync(required('STRIPE_WEBHOOK_SECRET_FILE'), 'utf8').trim(),
+    required('CHECKOUT_SUCCESS_URL'), required('CHECKOUT_CANCEL_URL')) : undefined;
+  const commerce = new PostgresCommerceService(pool, paymentGateway);
   let shuttingDown = false;
   const server = createPostgresLicenseApi(pool, auth, licenses, publishing,
-    store ? new PostgresPackageReader(pool, store) : undefined, () => shuttingDown);
+    store ? new PostgresPackageReader(pool, store) : undefined, () => shuttingDown, commerce,
+    { auth: makeAuth('drm:admin'), service: new PostgresAdministrationService(pool) });
   try {
     await pool.query('SELECT 1');
     await new Promise<void>((resolve, reject) => {
@@ -144,16 +152,22 @@ async function main(): Promise<void> {
   let maintenanceRun: Promise<void> | undefined;
   let tenantCursor = '00000000-0000-0000-0000-000000000000';
   const reconcile = () => {
-    if (shuttingDown || maintenanceRun || !publishing) return;
+    if (shuttingDown || maintenanceRun || !publishing && !paymentGateway) return;
     maintenanceRun = (async () => {
-      const tenants = await pool.query<{ id: string }>('SELECT id FROM drm.tenants WHERE id > $1 ORDER BY id LIMIT 4', [tenantCursor]);
+      const tenants = await pool.query<{ id: string }>('SELECT tenant_id AS id FROM drm.maintenance_tenants WHERE tenant_id > $1 ORDER BY tenant_id LIMIT 4', [tenantCursor]);
       tenantCursor = tenants.rows.at(-1)?.id ?? '00000000-0000-0000-0000-000000000000';
       const results = await Promise.allSettled(tenants.rows.map(async ({ id }) => {
-        const result = await publishing.publisher.reconcile(id, 2);
-        if (result.recovered || result.pending || result.cleaned) process.stdout.write(JSON.stringify({ event: 'publication.reconciled', tenantId: id, ...result }) + '\n');
+        if (publishing) {
+          const result = await publishing.publisher.reconcile(id, 2);
+          if (result.recovered || result.pending || result.cleaned) process.stdout.write(JSON.stringify({ event: 'publication.reconciled', tenantId: id, ...result }) + '\n');
+        }
+        if (paymentGateway) {
+          const result = await commerce.reconcileTenant(id);
+          if (result.reconciled || result.failed) process.stdout.write(JSON.stringify({ event: 'commerce.reconciled', tenantId: id, ...result }) + '\n');
+        }
       }));
       for (const result of results) if (result.status === 'rejected') {
-        process.stderr.write(JSON.stringify({ event: 'publication.reconciliation_failed', errorName: result.reason instanceof Error ? result.reason.name : 'UnknownError' }) + '\n');
+        process.stderr.write(JSON.stringify({ event: 'maintenance.tenant_failed', errorName: result.reason instanceof Error ? result.reason.name : 'UnknownError' }) + '\n');
       }
     })().catch((error: unknown) => {
       process.stderr.write(JSON.stringify({ event: 'publication.discovery_failed', errorName: error instanceof Error ? error.name : 'UnknownError' }) + '\n');

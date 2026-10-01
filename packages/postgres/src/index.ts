@@ -8,3 +8,5 @@ export * from './maintenance.ts';
 export * from './package-reader.ts';
 export * from './catalog.ts';
 export * from './object-store.ts';
+export * from './commerce.ts';
+export * from './administration.ts';

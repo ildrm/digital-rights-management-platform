@@ -21,9 +21,13 @@ test('restricted runtime roles separate publication, delivery, and migration pri
       await appendOutboxEvent(client, tenantId, 'test.created', randomUUID(), {});
     });
     for (const sql of ['DELETE FROM drm.publication_operations', 'DELETE FROM drm.audit_events',
-      "UPDATE drm.publication_operations SET document = '{}'", 'SELECT * FROM public.drm_schema_migrations']) {
+      "UPDATE drm.publication_operations SET document = '{}'", 'SELECT * FROM public.drm_schema_migrations',
+      'DELETE FROM drm.maintenance_tenants']) {
       await assert.rejects(withTenantTransaction(api, tenantId, (client) => client.query(sql)), { code: '42501' });
     }
+    assert.equal((await api.query('SELECT tenant_id FROM drm.maintenance_tenants WHERE tenant_id = $1', [tenantId])).rowCount, 1);
+    assert.equal((await worker.query('SELECT tenant_id FROM drm.maintenance_tenants WHERE tenant_id = $1', [tenantId])).rowCount, 1);
+    assert.equal((await api.query('SELECT id FROM drm.tenants WHERE id = $1', [tenantId])).rowCount, 0);
     await assert.rejects(withTenantTransaction(worker, tenantId, (client) => client.query('SELECT * FROM drm.licenses')), { code: '42501' });
     assert.deepEqual(await dispatchOutboxBatch(worker, tenantId, 'restricted-worker', async () => {}, 1),
       { delivered: 1, retried: 0, deadLettered: 0 });

@@ -15,11 +15,19 @@ BEGIN
 END;
 $$;
 GRANT USAGE ON SCHEMA drm TO drm_runtime_api, drm_runtime_worker;
+GRANT SELECT ON drm.maintenance_tenants TO drm_runtime_api, drm_runtime_worker;
+GRANT SELECT, INSERT ON drm.user_roles TO drm_runtime_api;
+GRANT INSERT ON drm.users TO drm_runtime_api;
 GRANT SELECT ON drm.tenants, drm.users, drm.devices, drm.assets, drm.asset_versions,
   drm.policies, drm.entitlements, drm.rendition_keys, drm.asset_packages, drm.licenses,
   drm.device_activations, drm.device_challenges, drm.device_enrollment_challenges,
   drm.api_rate_windows, drm.publication_operations TO drm_runtime_api;
 GRANT SELECT, INSERT, DELETE ON drm.package_objects TO drm_runtime_api;
+GRANT SELECT, INSERT ON drm.offers, drm.purchase_orders, drm.payment_events, drm.commerce_journal TO drm_runtime_api;
+GRANT SELECT, INSERT, UPDATE, DELETE ON drm.payment_reconciliation TO drm_runtime_api;
+GRANT INSERT ON drm.entitlements TO drm_runtime_api;
+GRANT UPDATE (status) ON drm.offers TO drm_runtime_api;
+GRANT UPDATE (status, checkout_session_id, payment_intent_id, entitlement_id, paid_at) ON drm.purchase_orders TO drm_runtime_api;
 GRANT INSERT ON drm.devices, drm.assets, drm.asset_versions, drm.policies,
   drm.rendition_keys, drm.asset_packages, drm.licenses, drm.device_activations,
   drm.device_challenges, drm.device_enrollment_challenges, drm.api_rate_windows,

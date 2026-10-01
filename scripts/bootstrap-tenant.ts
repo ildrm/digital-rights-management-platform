@@ -20,6 +20,7 @@ try {
   const userId = randomUUID();
   await client.query('INSERT INTO drm.tenants(id, slug) VALUES ($1, $2)', [tenantId, slug]);
   await client.query('INSERT INTO drm.users(tenant_id, id, external_subject, status) VALUES ($1, $2, $3, $4)', [tenantId, userId, subject, 'active']);
+  for (const role of ['admin', 'creator', 'customer']) await client.query('INSERT INTO drm.user_roles(tenant_id,user_id,role) VALUES ($1,$2,$3)', [tenantId, userId, role]);
   await client.query('COMMIT');
   process.stdout.write(JSON.stringify({ tenantId, userId, subject }) + '\n');
 } catch (error) {

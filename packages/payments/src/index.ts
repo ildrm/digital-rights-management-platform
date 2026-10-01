@@ -1,5 +1,6 @@
 import Stripe from 'stripe';
 import { DomainError } from '@drm/core';
+export * from './checkout.ts';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const PAYMENT_INTENT = /^pi_[A-Za-z0-9]{8,128}$/;

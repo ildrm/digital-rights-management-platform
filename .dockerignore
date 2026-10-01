@@ -6,5 +6,8 @@ dist
 docs
 tests
 .secrets
+*.drmbackup
+*.dump
 *.log
 packages/*/test
+scripts/test

@@ -5,8 +5,9 @@ import { SignJWT } from 'jose';
 const [keyFile, issuer, audience, tenantId, subject, scopes] = process.argv.slice(2);
 if (!keyFile || !issuer || !audience || !tenantId || !subject || !scopes ||
     !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(tenantId) ||
-    subject.length > 256 || !/^(drm:license|drm:publish)( (drm:license|drm:publish))?$/.test(scopes)) {
-  throw new Error('Usage: issue-local-token.ts <auth-signing.pem> <issuer> <audience> <tenant-uuid> <subject> <drm:license|drm:publish|both>');
+    subject.length > 256 || scopes.split(' ').some((scope) => !['drm:license', 'drm:publish', 'drm:admin'].includes(scope)) ||
+    new Set(scopes.split(' ')).size !== scopes.split(' ').length) {
+  throw new Error('Usage: issue-local-token.ts <auth-signing.pem> <issuer> <audience> <tenant-uuid> <subject> <space-separated drm:license drm:publish drm:admin scopes>');
 }
 const key = createPrivateKey(readFileSync(keyFile, 'utf8'));
 if (key.asymmetricKeyType !== 'ed25519') throw new Error('Ed25519 signing key required');

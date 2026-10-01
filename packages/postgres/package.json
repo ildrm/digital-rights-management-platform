@@ -5,6 +5,7 @@
   "type": "module",
   "dependencies": {
     "@drm/core": "0.1.0",
+    "@drm/payments": "0.1.0",
     "pg": "8.23.0"
   },
   "exports": { ".": "./src/index.ts" }

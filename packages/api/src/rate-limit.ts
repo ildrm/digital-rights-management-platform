@@ -2,7 +2,7 @@ import type { Pool } from 'pg';
 import { DomainError } from '@drm/core';
 import { withTenantTransaction } from '@drm/postgres';
 
-export type LimitedOperation = 'device-challenge' | 'license-issue' | 'asset-publish' | 'asset-fetch';
+export type LimitedOperation = 'device-challenge' | 'license-issue' | 'asset-publish' | 'asset-fetch' | 'commerce-write';
 
 /** PostgreSQL row locks make limits consistent across API replicas. */
 export async function consumeUserRateLimit(

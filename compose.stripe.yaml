@@ -1,0 +1,15 @@
+# Enable after account provisioning and public HTTPS deployment.
+services:
+  api:
+    environment:
+      PAYMENT_PROVIDER: stripe
+      STRIPE_SECRET_KEY_FILE: /run/secrets/stripe-secret-key
+      STRIPE_WEBHOOK_SECRET_FILE: /run/secrets/stripe-webhook-secret
+      CHECKOUT_SUCCESS_URL: ${DRM_CHECKOUT_SUCCESS_URL:?Configure the trusted HTTPS success URL}
+      CHECKOUT_CANCEL_URL: ${DRM_CHECKOUT_CANCEL_URL:?Configure the trusted HTTPS cancel URL}
+    secrets: [stripe-secret-key, stripe-webhook-secret]
+secrets:
+  stripe-secret-key:
+    file: ${DRM_STRIPE_SECRET_KEY_FILE:?Configure the Stripe secret key file}
+  stripe-webhook-secret:
+    file: ${DRM_STRIPE_WEBHOOK_SECRET_FILE:?Configure the Stripe webhook signing secret file}

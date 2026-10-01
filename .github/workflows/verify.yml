@@ -92,3 +92,7 @@ jobs:
         run: docker stop drm-ci-bao drm-ci-s3 || true
       - name: Build API image
         run: docker build -t drm-api:ci .
+      - name: Build pinned Docker backup runtime
+        run: |
+          docker build -f Dockerfile.backup -t drm-backup:ci .
+          docker run --rm --entrypoint node drm-backup:ci --version

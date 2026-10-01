@@ -45,7 +45,7 @@ async function main(): Promise<void> {
     while (!stopping) {
       let tenantIds: string[] = [];
       try {
-        const discovered = await pool.query<{ id: string }>('SELECT id FROM drm.tenants ORDER BY id');
+        const discovered = await pool.query<{ id: string }>('SELECT tenant_id AS id FROM drm.maintenance_tenants ORDER BY tenant_id');
         tenantIds = discovered.rows.map((row) => row.id);
       } catch (error) {
         process.stderr.write(JSON.stringify({ event: 'outbox.discovery_failed', errorName: error instanceof Error ? error.name : 'UnknownError' }) + '\n');

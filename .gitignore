@@ -4,5 +4,7 @@ coverage/
 .env
 .env.*
 .secrets/
+*.drmbackup
+*.dump
 !.env.example
 .DS_Store
