@@ -3,7 +3,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { TextDecoder } from 'node:util';
 import type { Pool } from 'pg';
 import { ACTIONS, DomainError, type Action, type SignedLicense } from '@drm/core';
-import { issueDeviceChallenge, issueDeviceEnrollmentChallenge, registerDevice, revokeOwnedDevice, type DatabaseLicenseRequest, type PostgresAssetPublisher, type PostgresLicenseService, type PostgresPackageReader, type PublishAssetInput, type RegisterDeviceInput, withTenantTransaction } from '@drm/postgres';
+import { issueDeviceChallenge, issueDeviceEnrollmentChallenge, registerDevice, revokeOwnedDevice, PostgresCatalog, type DatabaseLicenseRequest, type PostgresAssetPublisher, type PostgresLicenseService, type PostgresPackageReader, type PublishAssetInput, type RegisterDeviceInput, withTenantTransaction } from '@drm/postgres';
 import type { AccessTokenVerifier } from './auth.ts';
 import { consumeUserRateLimit, type LimitedOperation } from './rate-limit.ts';
 
@@ -24,6 +24,7 @@ export interface LicenseApiDependencies {
   readonly publishAuth?: AccessTokenVerifier;
   readonly publisher?: Pick<PostgresAssetPublisher, 'publish' | 'status'>;
   readonly packageReader?: Pick<PostgresPackageReader, 'read'>;
+  readonly catalog?: Pick<PostgresCatalog, 'owned' | 'library'>;
   readonly ready?: () => Promise<void>;
   readonly logError?: (event: { requestId: string; errorName: string }) => void;
 }
@@ -56,6 +57,7 @@ export function createPostgresLicenseApi(
     licenses,
     ...(publishing ? { publishAuth: publishing.auth, publisher: publishing.publisher } : {}),
     ...(packageReader ? { packageReader } : {}),
+    ...(packageReader && publishing ? { catalog: new PostgresCatalog(pool) } : {}),
     ready: async () => {
       if (isDraining()) throw new DomainError('NOT_READY', 'API is draining');
       await pool.query('SELECT 1');
@@ -143,6 +145,22 @@ function oneUuidHeader(request: IncomingMessage, name: string): string {
   const value = request.headers[name];
   if (count !== 1 || typeof value !== 'string') throw new DomainError('INVALID_REQUEST', `One ${name} header required`);
   return uuid(value);
+}
+
+function catalogPage(url: URL): { limit: number; cursor?: string } {
+  for (const key of url.searchParams.keys()) {
+    if (!['limit', 'cursor'].includes(key) || url.searchParams.getAll(key).length !== 1) {
+      throw new DomainError('INVALID_REQUEST', 'Invalid catalog query');
+    }
+  }
+  const rawLimit = url.searchParams.get('limit');
+  const limit = rawLimit === null ? 20 : Number(rawLimit);
+  if (rawLimit !== null && !/^[1-9]\d{0,2}$/.test(rawLimit) ||
+      !Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+    throw new DomainError('INVALID_REQUEST', 'Catalog limit must be 1–100');
+  }
+  const rawCursor = url.searchParams.get('cursor');
+  return { limit, ...(rawCursor === null ? {} : { cursor: uuid(rawCursor) }) };
 }
 
 function challengeBody(body: Record<string, unknown>): string {
@@ -283,12 +301,25 @@ export function createLicenseApiServer(dependencies: LicenseApiDependencies,
         dependencies.publishAuth !== undefined && dependencies.publisher !== undefined;
       const publicationStatus = request.method === 'GET' && dependencies.publisher && dependencies.publishAuth
         ? /^\/v1\/publication-operations\/([^/]+)$/.exec(url.pathname) : null;
-      if (url.search || (!postRoute && !revokeMatch && !publishRoute && !packageMatch && !publicationStatus)) {
+      const ownedCatalog = request.method === 'GET' && url.pathname === '/v1/creator/assets' &&
+        dependencies.catalog && dependencies.publishAuth;
+      const libraryCatalog = request.method === 'GET' && url.pathname === '/v1/library' && dependencies.catalog;
+      if ((!ownedCatalog && !libraryCatalog && url.search) ||
+          (!postRoute && !revokeMatch && !publishRoute && !packageMatch && !publicationStatus && !ownedCatalog && !libraryCatalog)) {
         sendJson(response, 404, { error: 'NOT_FOUND' }, requestId);
         return;
       }
-      const principal = await (publishRoute || publicationStatus ? dependencies.publishAuth! : dependencies.auth).verify(oneAuthorizationHeader(request));
+      const principal = await (publishRoute || publicationStatus || ownedCatalog ? dependencies.publishAuth! : dependencies.auth).verify(oneAuthorizationHeader(request));
       const userId = await dependencies.resolveUser(principal.tenantId, principal.externalSubject);
+      if (ownedCatalog || libraryCatalog) {
+        const page = catalogPage(url);
+        await dependencies.consumeRate(principal.tenantId, userId, 'asset-fetch');
+        const result = ownedCatalog
+          ? await dependencies.catalog!.owned(principal.tenantId, userId, page.limit, page.cursor)
+          : await dependencies.catalog!.library(principal.tenantId, userId, page.limit, page.cursor);
+        sendJson(response, 200, { ...result }, requestId);
+        return;
+      }
       if (publicationStatus) {
         const operation = await dependencies.publisher!.status(principal.tenantId, userId, uuid(publicationStatus[1]));
         sendJson(response, 200, { operation }, requestId);

@@ -132,6 +132,18 @@ test('HTTP API binds issuance to verified identity and rejects tenant injection'
         return Buffer.from('{"ciphertext":"test"}');
       },
     },
+    catalog: {
+      async owned(tenant, owner, limit, cursor) {
+        assert.deepEqual([tenant, owner, limit, cursor], [tenantId, userId, 2, undefined]);
+        calls.push('owned-catalog');
+        return { items: [{ assetId, version: 1, renditionId, mimeType: 'application/pdf', createdAt: '2026-01-01T00:00:00.000Z' }] };
+      },
+      async library(tenant, user, limit, cursor) {
+        assert.deepEqual([tenant, user, limit, cursor], [tenantId, userId, 20, assetId]);
+        calls.push('library-catalog');
+        return { items: [] };
+      },
+    },
   }, { maxInFlight: 2, maxLargeTransfers: 1 });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   try {
@@ -207,6 +219,15 @@ test('HTTP API binds issuance to verified identity and rejects tenant injection'
     const operationResponse = await fetch(`${url}/v1/publication-operations/${randomUUID()}`, { headers: { Authorization: 'Bearer creator' } });
     assert.equal(operationResponse.status, 200);
     assert.deepEqual(await operationResponse.json(), { operation: { status: 'pending' } });
+    const creatorCatalog = await fetch(`${url}/v1/creator/assets?limit=2`, { headers: { Authorization: 'Bearer creator' } });
+    assert.equal(creatorCatalog.status, 200);
+    assert.equal((await creatorCatalog.json()).items[0].assetId, assetId);
+    assert.equal((await fetch(`${url}/v1/creator/assets?limit=2`, { headers: { Authorization: 'Bearer valid' } })).status, 401);
+    assert.equal((await fetch(`${url}/v1/creator/assets?limit=2&limit=3`, { headers: { Authorization: 'Bearer creator' } })).status, 400);
+    const library = await fetch(`${url}/v1/library?cursor=${assetId}`, { headers: { Authorization: 'Bearer valid' } });
+    assert.equal(library.status, 200);
+    assert.deepEqual(await library.json(), { items: [] });
+    assert.equal((await fetch(`${url}/v1/library?cursor=bad`, { headers: { Authorization: 'Bearer valid' } })).status, 400);
     const missingKey = await fetch(`${url}/v1/assets`, { method: 'POST', headers: { Authorization: 'Bearer creator', 'Content-Type': 'application/json' }, body: JSON.stringify(publishBody) });
     assert.equal(missingKey.status, 400);
     holdAuth = true;

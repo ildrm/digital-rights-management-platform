@@ -1,47 +1,53 @@
-# Self-hosted deployment notes
+# Docker standalone evaluation deployment
 
-This is a deployment path for the implemented secure-viewer slice. The [release gate](release-status.md) remains FAIL; the API must not be exposed as a production product yet.
+The [release gate](release-status.md) is **FAIL**. This deployment runs the implemented secure-viewer slice without third-party accounts. It uses only the formally supported Node 24 and PostgreSQL 18 runtime images. It is a single-host evaluation topology with a loopback-only HTTP API.
 
-## Services
+## Start
 
-1. Run PostgreSQL with TLS, backups, and a dedicated non-owner application role without `BYPASSRLS`. Apply migrations with `npm run migrate` using a dedicated migration role and `MIGRATION_DATABASE_URL` plus `MIGRATION_DATABASE_CA_FILE`; the runner takes a deployment lock and verifies recorded checksums. Existing pre-ledger installations need a separately reviewed baseline. Run `infrastructure/postgres/provision-runtime.sql` after migrations, then grant the API login only `drm_runtime_api` and the outbox login only `drm_runtime_worker`. Keep those logins distinct from the migration owner and verify `FORCE ROW LEVEL SECURITY` with them. Migration 011 requires a temporary migration identity with `BYPASSRLS` for cross-tenant private-key cleanup; runtime roles must never receive it.
-2. Run OpenBao 2.7.0 or later with TLS, durable storage, audit logging, recovery/unseal procedures, and a scoped workload token. Enable Transit. Create an Ed25519 signing key (`type=ed25519`, `exportable=false`) and a derived AES-256-GCM key per tenant (`type=aes256-gcm96`, `derived=true`, `exportable=false`). Pin the signing version in configuration. Do not give the API token permission to create, export, rotate, or delete Transit keys.
-3. Run a maintained S3-compatible object service such as SeaweedFS with TLS, private bucket, scoped credentials, replication, backups, and restore drills. The API needs conditional `PutObject`, `GetObject`, SHA-256 checksum, and delete for abandoned publication cleanup. Objects contain application-encrypted packages; no server-side AWS KMS setting is required.
-4. Run an OIDC provider that signs short access tokens with trusted `tenant_id`, `drm:license`, and `drm:publish` scopes. Map subjects to active users in `drm.users`. The API requires a verified HTTPS issuer and JWKS URL.
-5. Put an HTTPS gateway in front of the API. Apply edge rate limits, upload size limits, logging, and network policy. The app container listens on internal HTTP only.
-
-OpenBao supports both Raft and PostgreSQL durable storage. These are operator choices requiring a backup and recovery design. The disposable tests used OpenBao dev mode and SeaweedFS mini mode only; neither is a production topology. [OpenBao storage guidance](https://openbao.org/docs/configuration/storage/), [SeaweedFS release images](https://github.com/seaweedfs/seaweedfs/blob/master/docker/README.md).
-
-## Configuration
-
-See [api.env.example](../config/api.env.example). `DATABASE_URL`, `DATABASE_CA_FILE`, `OPENBAO_ADDR`, `OPENBAO_TOKEN_FILE`, the pinned signing key name/version, `OPENBAO_TENANT_KEYS_JSON`, OIDC settings, and `LICENSE_ISSUER` are mandatory. Each tenant key ring names an active Transit key for new packages and an explicit allowlist for older keys. Remove an old key only after its packages are retired or rewrapped.
-
-Set `PACKAGE_BUCKET` and `OBJECT_STORE_ENDPOINT` together to enable `/v1/assets`. The endpoint must be an HTTPS origin. Supply `OBJECT_STORE_ACCESS_KEY_FILE` and `OBJECT_STORE_SECRET_KEY_FILE` through mounted secrets. `OBJECT_STORE_REGION` defaults to `us-east-1` for S3 request signing; it does not imply AWS hosting. If bucket and endpoint are absent, `/v1/assets` returns 404. `LISTEN_HOST` defaults to loopback and should be changed to `0.0.0.0` only inside a protected container network.
+Prerequisites: Docker Compose, Node 24.21.0, and OpenSSL. The Node and OpenSSL commands below generate local configuration; the runtime services run in Docker. Keep `.secrets/standalone` private and back it up securely.
 
 ```sh
-npm ci
-npm run typecheck
-node --experimental-strip-types packages/api/src/main.ts
+mkdir -p .secrets/standalone
+node --experimental-strip-types scripts/bootstrap-docker-database.ts .secrets/standalone/database
+node --experimental-strip-types scripts/bootstrap-local-keys.ts .secrets/standalone/keys
+docker compose -f compose.standalone.yaml up --build -d
+docker compose -f compose.standalone.yaml ps
 ```
 
-The Dockerfile uses pinned Node 26 and UID 1000. The current image built and passed runtime/UID smoke checks. A deployed cluster, TLS endpoints, scoped secrets, alerting, restore, load, and failover testing are still outstanding.
+The PostgreSQL container enables TLS with a generated server certificate for `postgres` and SCRAM host authentication. The migration container applies checksummed migrations and provisions separate, non-owner API and worker logins. The API uses PostgreSQL for encrypted package bytes, file-backed Ed25519 license signing, tenant-derived AES-256-GCM content-key wrapping, and a local Ed25519 access-token verifier. The signing private key and wrapping key are mounted into the API. The local access-token signing key is mounted only into the optional operator container. Rotate, back up, and restrict these files as production secrets; loss of the wrapping key makes old packages unreadable. No automatic key rotation or multi-version local key ring exists yet.
 
-## Publication recovery
+The first operator tenant and active subject can be created with:
 
-With object storage configured, API replicas run a bounded reconciliation task independently of HTTP requests every five seconds. It discovers up to four tenants per pass and processes up to two operations per tenant. Operation row locks serialize recovery with retries; multiple replicas may run the task safely. Monitor `publication.reconciled` pending counts and `publication.reconciliation_failed` / `publication.discovery_failed` logs. Pending ciphertext is stored in PostgreSQL until commit or abandonment, so include this storage in database capacity planning.
+```sh
+docker compose -f compose.standalone.yaml run --rm operator node --experimental-strip-types scripts/bootstrap-tenant.ts example operator-1
+```
 
-After a provider outage, restore connectivity and confirm pending operations become committed through the status endpoint. Never delete objects merely because a client received a timeout. After 24 hours, pending operations become immutable abandonment records; cleanup repeatedly removes their unique objects, including delayed uploads. Keep these records until a separately reviewed retention procedure exists. Do not manually reset abandoned operations or reuse their object keys. Reconcile objects predating migration 013 separately; the new operation table cannot discover their history.
+Record the returned tenant UUID. The operator can issue a five-minute access token for that subject with:
 
-## Outbox worker
+```sh
+docker compose -f compose.standalone.yaml run --rm operator node --experimental-strip-types scripts/issue-local-token.ts /run/secrets/auth-signing drm-local drm-api TENANT_UUID operator-1 'drm:license drm:publish'
+```
 
-Run a separate replica of the API image with command `node --experimental-strip-types packages/api/src/outbox-worker.ts`. Set `DATABASE_URL` and `DATABASE_CA_FILE` as for the API, plus `WEBHOOK_ENDPOINT` (an HTTPS destination owned by the platform), and `WEBHOOK_SECRET_FILE` (a mounted file containing a base64url-encoded key of at least 32 random bytes). The worker discovers tenant IDs from PostgreSQL. Give it a distinct non-owner PostgreSQL role with only the table privileges it needs. The recipient must verify the `X-DRM-Signature` HMAC-SHA256 over `<X-DRM-Timestamp>.<raw request body>`, reject stale timestamps, and deduplicate by `Idempotency-Key` for at least the maximum retry horizon. The worker does not follow redirects.
+Run the authenticated publish/idempotency/catalog smoke test with an existing tenant UUID and subject:
 
-Events are leased for 60 seconds and retried with capped exponential delay. Each claim has a fencing token so an expired attempt cannot acknowledge a later claim by the same worker. After eight failed attempts, including expired crash attempts, they are marked dead-lettered and remain in PostgreSQL. Alert on `outbox.batch.deadLettered > 0` and on persistent `outbox.error`; investigate the destination and explicitly requeue a repaired event using `requeueDeadLetterOutboxEvent` with a tenant-scoped operator session. This is at-least-once delivery: a successful HTTP response followed by an acknowledgment failure can result in another delivery. The worker deletes expired rate windows and one-time challenges after a 24-hour safety delay in repeated bounded batches, and emits `maintenance.batch` logs with a backlog flag. It does not delete audit events or licenses.
+```sh
+node --experimental-strip-types scripts/smoke-standalone.ts TENANT_UUID operator-1
+```
 
-## Local interoperability evidence
+The API still requires a device enrollment and an entitlement before it can issue a license. The token command is an administrative test path, not customer registration or MFA. Do not expose port 8080 beyond loopback. A public deployment needs TLS termination and a complete identity and account recovery design. Do not place the operator container or its private key on the public network.
 
-The optional tests in `packages/openbao/test/live.test.ts`, `packages/aws-s3/test/live.test.ts`, and `packages/postgres/test/selfhosted-stack.test.ts` exercised OpenBao 2.7.0 dev mode, SeaweedFS 4.47 mini mode, and a disposable PostgreSQL database. The full path published an encrypted package, persisted policy and package metadata, issued a device-bound signed license, fetched ciphertext, and opened its authorized chunk. The tests require `BAO_TEST=1`, `S3_TEST=1`, `SELFHOST_TEST=1`, and `PG_TEST=1` with disposable endpoints and credentials.
+Do not regenerate `.secrets/standalone` while its PostgreSQL volume contains data. Keep the database passwords, signing key, wrapping key, and CA trust material together in the backup/recovery plan.
 
-## Operations still required
+## Service configuration
 
-PostgreSQL and OpenBao backup/restore, SeaweedFS replication, audit retention, key rotation and revocation runbooks, dashboards, alerts, deployment rollbacks, and incident drills are outstanding. The outbox worker has a signed HTTPS delivery path, but no production destination or deployed worker has been verified. Liveness/readiness checks cover process and database only.
+[`compose.standalone.yaml`](../compose.standalone.yaml) pins the Node and PostgreSQL image versions, uses a private Docker network, a persistent database volume, Docker secrets, a one-shot migration job, readiness checks, and restart policies. The app image runs as UID 1000. The PostgreSQL entrypoint copies its secret key into a PostgreSQL-owned, mode-0600 file before enabling TLS. The generated CA certificate expires in one year; renew it and coordinate server/client trust before expiry. Database and key material need off-host encrypted backups and restore exercises.
+
+`PACKAGE_STORE=postgres` avoids an S3 service. Optional S3, OpenBao, and remote OIDC modes remain in [`api.env.example`](../config/api.env.example) for existing integrations, but their community deployments have not been established as compliant with the formal-LTS requirement. The outbox worker requires an actual HTTPS recipient and is not started in this Compose file. Payment processing requires a Stripe account and is not activated by this deployment.
+
+## Local checks and evidence
+
+`LOCAL_NO_DOCKER=1 npm run test:integration` runs the disposable PostgreSQL/HTTP gate and a snapshot/restore drill when the Docker daemon is unavailable. `npm run drill:postgres` can run against separate source and recovery databases; see the script's required `DR_*` environment variables. Its report compares backup bytes, SHA-256, row counts, and table digests, but it does not measure complete RPO/RTO or restore application signing/wrapping keys.
+
+`npm run load:test -- <URL> <seconds> <concurrency>` checks bounded readiness or catalog GET traffic. `LOAD_RPS`, `LOAD_MAX_P95_MS`, `LOAD_MAX_ERROR_RATE`, and `LOAD_REPORT_FILE` control the run. A release load campaign must also cover publish, license issuance, package retrieval, outbox delivery, and node/database loss on a multi-host deployment.
+
+The previous OpenBao and SeaweedFS disposable provider tests remain available through `BAO_TEST=1`, `S3_TEST=1`, and `SELFHOST_TEST=1` with explicit local endpoints. They validate adapters only and do not qualify the standalone Compose or production providers.

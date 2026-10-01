@@ -9,6 +9,7 @@ if (files.length === 0) throw new Error('No migrations found');
 
 const caFile = process.env.MIGRATION_DATABASE_CA_FILE;
 const databaseUrl = process.env.MIGRATION_DATABASE_URL;
+const databasePasswordFile = process.env.MIGRATION_DATABASE_PASSWORD_FILE;
 const localHost = (host: string) => host.startsWith('/') || ['localhost', '127.0.0.1', '::1', '[::1]'].includes(host);
 if (databaseUrl) {
   const endpoint = new URL(databaseUrl);
@@ -20,7 +21,11 @@ if (databaseUrl) {
   throw new Error('Remote migration database requires a trusted CA file');
 }
 const client = new pg.Client({
-  ...(databaseUrl ? { connectionString: databaseUrl } : {}),
+  ...(databaseUrl ? { connectionString: (() => {
+    const url = new URL(databaseUrl);
+    if (databasePasswordFile) url.password = readFileSync(databasePasswordFile, 'utf8').trim();
+    return url.toString();
+  })() } : {}),
   ...(caFile ? { ssl: { ca: readFileSync(caFile, 'utf8'), rejectUnauthorized: true } } : {}),
   connectionTimeoutMillis: 5000,
   query_timeout: 30_000,

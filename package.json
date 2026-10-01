@@ -8,16 +8,18 @@
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
+    "load:test": "node --experimental-strip-types scripts/load-test.ts",
+    "drill:postgres": "node --experimental-strip-types scripts/drill-postgres-restore.ts",
     "migrate": "node --experimental-strip-types scripts/migrate.ts",
     "test:integration": "bash scripts/verify-local.sh",
-    "test": "node --experimental-strip-types --test packages/core/test/*.test.ts packages/postgres/test/*.test.ts packages/aws-kms/test/*.test.ts packages/aws-s3/test/*.test.ts packages/openbao/test/*.test.ts packages/axinom/test/*.test.ts packages/api/test/*.test.ts"
+    "test": "node --experimental-strip-types --test packages/core/test/*.test.ts packages/postgres/test/*.test.ts packages/aws-kms/test/*.test.ts packages/aws-s3/test/*.test.ts packages/openbao/test/*.test.ts packages/axinom/test/*.test.ts packages/api/test/*.test.ts packages/payments/test/*.test.ts"
   },
   "devDependencies": {
-    "@types/node": "26.5.1",
+    "@types/node": "24.19.0",
     "@types/pg": "8.23.1",
     "typescript": "7.0.2"
   },
   "engines": {
-    "node": ">=26.0.0"
+    "node": ">=24.21.0 <27"
   }
 }

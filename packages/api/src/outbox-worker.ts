@@ -16,6 +16,7 @@ async function main(): Promise<void> {
   if (!['postgres:', 'postgresql:'].includes(databaseUrl.protocol) || !databaseUrl.hostname || databaseUrl.search) {
     throw new Error('DATABASE_URL must be a PostgreSQL URL without connection parameters');
   }
+  if (process.env.DATABASE_PASSWORD_FILE) databaseUrl.password = readFileSync(required('DATABASE_PASSWORD_FILE'), 'utf8').trim();
   const secretText = readFileSync(required('WEBHOOK_SECRET_FILE'), 'utf8').trim();
   if (!/^[A-Za-z0-9_-]{43,}$/.test(secretText)) throw new Error('WEBHOOK_SECRET_FILE must contain a base64url key');
   const secret = Buffer.from(secretText, 'base64url');

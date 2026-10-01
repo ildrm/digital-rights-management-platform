@@ -3,8 +3,9 @@ import { S3Client } from '@aws-sdk/client-s3';
 import pg from 'pg';
 import { S3CompatiblePackageStore } from '@drm/aws-s3';
 import { OpenBaoKeyWrapper, OpenBaoLicenseSigner, OpenBaoTransitClient, type TenantTransitKeyRing } from '@drm/openbao';
-import { PostgresAssetPublisher, PostgresLicenseService, PostgresPackageReader } from '@drm/postgres';
-import { createPostgresLicenseApi, OidcAccessTokenVerifier } from './index.ts';
+import { PostgresAssetPublisher, PostgresLicenseService, PostgresPackageReader, PostgresPackageStore, type ProtectedPackageStore } from '@drm/postgres';
+import { createPostgresLicenseApi, LocalAccessTokenVerifier, OidcAccessTokenVerifier } from './index.ts';
+import { LocalKeyWrapper, LocalLicenseSigner } from './local-keys.ts';
 import { armHardStop, endPoolWithin } from './runtime-deadlines.ts';
 
 function required(name: string): string {
@@ -41,7 +42,8 @@ async function main(): Promise<void> {
     throw new Error('DATABASE_URL must be a PostgreSQL URL without connection parameters');
   }
   const ca = readFileSync(required('DATABASE_CA_FILE'), 'utf8');
-  const keyMap = tenantKeyMap(required('OPENBAO_TENANT_KEYS_JSON'));
+  const databasePassword = process.env.DATABASE_PASSWORD_FILE ? readFileSync(required('DATABASE_PASSWORD_FILE'), 'utf8').trim() : undefined;
+  if (databasePassword) databaseUrl.password = databasePassword;
   const portText = process.env.PORT ?? '8080';
   const port = Number(portText);
   if (!Number.isSafeInteger(port) || port < 1 || port > 65535) throw new Error('PORT must be 1–65535');
@@ -55,23 +57,48 @@ async function main(): Promise<void> {
   pool.on('error', (error) => {
     process.stderr.write(JSON.stringify({ event: 'database.idle_client_error', errorName: error.name }) + '\n');
   });
-  const bao = new OpenBaoTransitClient(required('OPENBAO_ADDR'), readFileSync(required('OPENBAO_TOKEN_FILE'), 'utf8').trim());
-  const signingVersion = Number(required('OPENBAO_SIGNING_KEY_VERSION'));
-  const signer = new OpenBaoLicenseSigner(bao, required('OPENBAO_SIGNING_KEY_NAME'), signingVersion);
-  const wrapper = new OpenBaoKeyWrapper(bao, (tenantId) => keyMap.get(tenantId.toLowerCase()) ?? { activeKeyName: '', permittedKeyNames: [] });
-  const auth = new OidcAccessTokenVerifier({
-    issuer: required('OIDC_ISSUER'),
-    audience: required('OIDC_AUDIENCE'),
-    jwksUrl: required('OIDC_JWKS_URL'),
-    requiredScope: 'drm:license',
-  });
+  const keyProvider = process.env.KEY_PROVIDER ?? 'openbao';
+  let signer: OpenBaoLicenseSigner | LocalLicenseSigner;
+  let wrapper: OpenBaoKeyWrapper | LocalKeyWrapper;
+  if (keyProvider === 'local') {
+    const wrappingKeyText = readFileSync(required('LOCAL_WRAPPING_KEY_FILE'), 'utf8').trim();
+    if (!/^[A-Za-z0-9_-]{43}$/.test(wrappingKeyText)) throw new Error('LOCAL_WRAPPING_KEY_FILE must contain 32 base64url bytes');
+    const wrappingKey = Buffer.from(wrappingKeyText, 'base64url');
+    if (wrappingKey.length !== 32 || wrappingKey.toString('base64url') !== wrappingKeyText) throw new Error('Invalid local wrapping key');
+    wrapper = new LocalKeyWrapper(wrappingKey, required('LOCAL_KEY_VERSION'));
+    wrappingKey.fill(0);
+    signer = new LocalLicenseSigner(readFileSync(required('LOCAL_SIGNING_KEY_FILE'), 'utf8'), required('LOCAL_KEY_VERSION'));
+  } else if (keyProvider === 'openbao') {
+    const keyMap = tenantKeyMap(required('OPENBAO_TENANT_KEYS_JSON'));
+    const bao = new OpenBaoTransitClient(required('OPENBAO_ADDR'), readFileSync(required('OPENBAO_TOKEN_FILE'), 'utf8').trim());
+    signer = new OpenBaoLicenseSigner(bao, required('OPENBAO_SIGNING_KEY_NAME'), Number(required('OPENBAO_SIGNING_KEY_VERSION')));
+    wrapper = new OpenBaoKeyWrapper(bao, (tenantId) => keyMap.get(tenantId.toLowerCase()) ?? { activeKeyName: '', permittedKeyNames: [] });
+  } else throw new Error('KEY_PROVIDER must be local or openbao');
+  const authProvider = process.env.AUTH_PROVIDER ?? 'oidc';
+  const makeAuth = (requiredScope: string) => {
+    if (authProvider === 'local') return new LocalAccessTokenVerifier(
+      readFileSync(required('LOCAL_AUTH_PUBLIC_KEY_FILE'), 'utf8'), required('LOCAL_AUTH_ISSUER'), required('LOCAL_AUTH_AUDIENCE'), requiredScope);
+    if (authProvider === 'oidc') return new OidcAccessTokenVerifier({
+      issuer: required('OIDC_ISSUER'), audience: required('OIDC_AUDIENCE'),
+      jwksUrl: required('OIDC_JWKS_URL'), requiredScope,
+    });
+    throw new Error('AUTH_PROVIDER must be local or oidc');
+  };
+  const auth = makeAuth('drm:license');
   const licenses = new PostgresLicenseService(pool, signer, wrapper, required('LICENSE_ISSUER'), () => new Date().toISOString());
   const bucket = process.env.PACKAGE_BUCKET;
   const objectEndpoint = process.env.OBJECT_STORE_ENDPOINT;
-  if (Boolean(bucket) !== Boolean(objectEndpoint)) throw new Error('PACKAGE_BUCKET and OBJECT_STORE_ENDPOINT must both be set');
+  const storageMode = process.env.PACKAGE_STORE ?? (bucket || objectEndpoint ? 's3' : 'none');
+  if (!['none', 'postgres', 's3'].includes(storageMode) ||
+      storageMode === 'postgres' && (bucket || objectEndpoint) ||
+      storageMode === 's3' && (!bucket || !objectEndpoint) ||
+      storageMode === 'none' && (bucket || objectEndpoint)) {
+    throw new Error('PACKAGE_STORE must be none, postgres, or s3 with matching object-store settings');
+  }
   let s3: S3Client | undefined;
-  let store: S3CompatiblePackageStore | undefined;
-  if (bucket && objectEndpoint) {
+  let store: ProtectedPackageStore | undefined;
+  if (storageMode === 'postgres') store = new PostgresPackageStore(pool);
+  if (storageMode === 's3' && bucket && objectEndpoint) {
     const endpoint = new URL(objectEndpoint);
     if (endpoint.protocol !== 'https:' || endpoint.username || endpoint.password || endpoint.search || endpoint.hash || endpoint.pathname !== '/') {
       throw new Error('OBJECT_STORE_ENDPOINT must be an HTTPS origin');
@@ -87,10 +114,7 @@ async function main(): Promise<void> {
     store = new S3CompatiblePackageStore(s3, bucket);
   }
   const publishing = store ? {
-    auth: new OidcAccessTokenVerifier({
-      issuer: required('OIDC_ISSUER'), audience: required('OIDC_AUDIENCE'),
-      jwksUrl: required('OIDC_JWKS_URL'), requiredScope: 'drm:publish',
-    }),
+    auth: makeAuth('drm:publish'),
     publisher: new PostgresAssetPublisher(pool, store, wrapper, signer),
   } : undefined;
   let shuttingDown = false;

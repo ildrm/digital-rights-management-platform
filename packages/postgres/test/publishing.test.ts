@@ -3,7 +3,7 @@ import { createHash, generateKeyPairSync, randomUUID, sign } from 'node:crypto';
 import test from 'node:test';
 import pg from 'pg';
 import type { KeyWrapper, SecurePackage } from '@drm/core';
-import { PostgresAssetPublisher, withTenantTransaction, type ProtectedPackageStore } from '../src/index.ts';
+import { PostgresAssetPublisher, PostgresCatalog, withTenantTransaction, type ProtectedPackageStore } from '../src/index.ts';
 
 test('publishing writes encrypted package metadata, immutable policy, audit and outbox atomically', { skip: process.env.PG_TEST !== '1' }, async () => {
   const database = process.env.PG_TEST_DATABASE;
@@ -72,6 +72,29 @@ test('publishing writes encrypted package metadata, immutable policy, audit and 
     });
     const result = await publisher.publish(base);
     assert.equal(result.version, 1);
+    const catalog = new PostgresCatalog(runtimePool);
+    assert.deepEqual((await catalog.owned(tenantId, ownerUserId)).items.map((item) => item.assetId), [result.assetId]);
+    assert.deepEqual((await catalog.owned(tenantId, randomUUID())).items, []);
+    assert.deepEqual((await catalog.owned(randomUUID(), ownerUserId)).items, []);
+    const readerId = randomUUID();
+    const entitlementId = randomUUID();
+    await withTenantTransaction(pool, tenantId, async (client) => {
+      await client.query("INSERT INTO drm.users (tenant_id, id, external_subject, status) VALUES ($1, $2, $3, 'active')",
+        [tenantId, readerId, `reader:${readerId}`]);
+      await client.query(`INSERT INTO drm.entitlements
+        (tenant_id, id, subject_user_id, asset_id, asset_version, policy_id, policy_version, source, status, valid_from)
+        VALUES ($1, $2, $3, $4, 1, $5, 1, 'free', 'active', clock_timestamp() - interval '1 minute')`,
+        [tenantId, entitlementId, readerId, result.assetId, result.policyId]);
+    });
+    const library = await catalog.library(tenantId, readerId);
+    assert.deepEqual(library.items.map((item) => [item.entitlementId, item.assetId]), [[entitlementId, result.assetId]]);
+    assert.deepEqual((await catalog.library(tenantId, ownerUserId)).items, []);
+    assert.deepEqual((await catalog.library(tenantId, readerId, 20, entitlementId)).items, []);
+    await assert.rejects(catalog.library(tenantId, readerId, 101), { code: 'INVALID_REQUEST' });
+    await withTenantTransaction(pool, tenantId, async (client) => {
+      await client.query("UPDATE drm.entitlements SET status = 'revoked' WHERE tenant_id = $1 AND id = $2", [tenantId, entitlementId]);
+    });
+    assert.deepEqual((await catalog.library(tenantId, readerId)).items, []);
     assert.equal(stored.size, 1);
     assert.equal(stored.get(result.objectKey)?.manifest.identity.assetId, result.assetId);
     assert.ok(!JSON.stringify(stored.get(result.objectKey)).includes(base.content.toString()));
@@ -136,6 +159,13 @@ test('publishing writes encrypted package metadata, immutable policy, audit and 
       return result.rows.map((row) => row.object_key);
     });
     assert.equal(catalogKeys.length, 2);
+    const firstPage = await catalog.owned(tenantId, ownerUserId, 1);
+    assert.equal(firstPage.items.length, 1);
+    assert.ok(firstPage.nextCursor);
+    const secondPage = await catalog.owned(tenantId, ownerUserId, 1, firstPage.nextCursor);
+    assert.equal(secondPage.items.length, 1);
+    assert.notEqual(firstPage.items[0]!.assetId, secondPage.items[0]!.assetId);
+    assert.equal(secondPage.nextCursor, undefined);
     for (const key of catalogKeys) assert.ok(stored.has(key));
     await assert.rejects(publisher.publish({ ...base, content: Buffer.from('changed content') }), { code: 'IDEMPOTENCY_CONFLICT' });
     await assert.rejects(publisher.status(tenantId, randomUUID(), base.idempotencyKey), { code: 'PUBLICATION_NOT_FOUND' });

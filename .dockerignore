@@ -5,6 +5,6 @@ coverage
 dist
 docs
 tests
-infrastructure
+.secrets
 *.log
 packages/*/test

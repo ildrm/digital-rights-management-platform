@@ -1,37 +1,34 @@
-# Release review — 2026-09-30
+# Release review — 2026-10-01
 
-**Release status: FAIL.** The self-hosted publishing and licensing slice works against disposable services. The universal rights platform described in the implementation prompt is incomplete and has not passed a production deployment gate. Local PASS entries below describe only narrow checks of this revision, not production acceptance. See the [requirements audit](production-audit.md) for the feature-by-feature gap review.
+**Release status: FAIL.** The repository implements a tested secure-viewer slice. It is not the full universal digital-rights product and has no production deployment evidence.
 
-| Area | Status | Evidence or blocker |
+## Implemented in this working tree
+
+| Area | Result | Limit |
 | --- | --- | --- |
-| Core policy, entitlement, license, encrypted packaging | LOCAL PASS, INCOMPLETE | Strict typecheck and focused tests of the narrow primitive; no protected client or full policy enforcement |
-| PostgreSQL schema and tenant isolation | LOCAL PASS, INCOMPLETE | Migrations 001–013, SQL isolation, separate API/worker roles, and denied-privilege tests; no production migration or restore evidence |
-| License, publishing, and package retrieval APIs | LOCAL PASS, INCOMPLETE | OIDC verifier, 8 MiB uploads, durable idempotent publication, owner-scoped operation status, recovery, and HTTP admission limits; live IdP absent |
-| OpenBao Transit signing and key wrapping | LOCAL PASS, INCOMPLETE | Live checks against disposable OpenBao 2.7.0 dev mode; no HA, production TLS, or key lifecycle proof |
-| S3-compatible encrypted package storage | LOCAL PASS, INCOMPLETE | Live SeaweedFS 4.47 mini-mode put/get/integrity tests; no replicated filer metadata or object recovery proof |
-| Transactional outbox delivery | FAIL | Claim fencing, crash retry exhaustion, signed HTTPS worker, and requeue pass local tests; no production destination, deployed worker, idempotent recipient or alert proof |
-| Identity, catalog, ingestion, commerce, UI, enterprise | FAIL | Only active-user lookup and a narrow package catalog exist; complete services and interfaces are absent |
-| Certified media DRM and protected clients | FAIL | No Widevine, FairPlay, PlayReady, Readium LCP, remote rendering, or production client verifier integration |
-| Live DRM and payment-provider certification | BLOCKED BY EXTERNAL DEPENDENCY | No provider agreements, credentials, certified devices, payment account, or external test environment; application features are also incomplete |
-| Offline native protection and trusted time | FAIL | License claims exist; client verifier and rollback-resistant state absent |
-| Security assurance | FAIL | Threat model and negative-path tests exist; no penetration test or production key lifecycle validation |
-| Accessibility and localization | FAIL | No UI to assess |
-| Reliability and disaster recovery | FAIL | No durable high-availability deployment, load test, or restore drill |
-| Observability and incident response | FAIL | No complete telemetry or exercised incident runbook |
-| Deployment and supply chain | FAIL | Pinned non-root Node 26 container builds; local audit and SBOM command pass; CI has not run on hosted infrastructure and no signed artifact or staging evidence exists |
-| Documentation | FAIL | API, provider decision, threat model, deployment notes and requirements audit exist; full operator and user guides are absent |
+| Core policy, licenses, encrypted packages | Local tests pass | No protected browser/native client or certified media DRM |
+| PostgreSQL schema and tenant isolation | Migrations 001–015, restricted role checks, package byte storage, catalog listing | No HA deployment or measured production recovery |
+| API | Device, license, bounded publish, package retrieval, creator/library listing | No full account lifecycle, creator/customer UI, scanning, or media processing |
+| Standalone service path | Docker Compose runs Node 24 LTS and PostgreSQL 18; local Ed25519 signing, tenant-bound AES-GCM wrapping, and operator-issued tokens remove mandatory OpenBao, S3, and OIDC service dependencies | Local tokens are an operator mechanism, not a consumer identity product; single database host and localhost HTTP are not HA or public TLS |
+| Payments | Stripe PaymentIntent creation and webhook signature/amount validation adapter has offline tests | No order state machine, entitlement grant, refund/reconciliation, Stripe account, sandbox or live transaction proof |
+| Operations | Bounded load harness and PostgreSQL snapshot/restore drill | Local smoke/restore evidence is not sustained capacity, RPO/RTO, or disaster recovery proof |
 
-The optional AWS KMS and Axinom adapters remain in the repository as inactive contract-tested code. Neither is part of the self-hosted API runtime. No AWS account is required for the tested slice. Self-hosted Transit does not supply certified commercial DRM or a payment processor.
+The optional OpenBao, SeaweedFS/S3, external OIDC, AWS, and Axinom adapters remain in source for compatibility. They are outside the formal-LTS standalone Compose path. The user requires **formal LTS for every runtime service**; an OpenBao/SeaweedFS community deployment cannot be claimed compliant without a formal support commitment. The Node application itself requires an owner support and patch policy before release.
 
-## Executed checks
+## Verification in this revision
 
-For this working-tree revision, `npm run test:integration` passed strict TypeScript checking and **33/33 tests, with zero skipped**. The command creates and removes disposable PostgreSQL, OpenBao, and SeaweedFS services. Checks include a restricted-role publish-to-license-and-retrieve journey, uncertain uploads and COMMIT acknowledgements, idempotent retries, restart recovery, abandonment cleanup, active database disconnect/recovery, stalled storage reads, outbox fencing, HTTP admission limits, and maximum-size upload. Migrations 001–013 passed on fresh PostgreSQL 17; rerunning the ledger-based runner made no changes. `tests/postgres/core.sql` and separate runtime-role provisioning passed. The earlier remediation batch also passed an upgrade of migrations 011–012, an audit reporting zero known vulnerabilities, and SBOM generation with 54 components. Hosted PostgreSQL 18 CI has not run for this revision. These local tests do not establish high availability, production durability, TLS, deployed credentials, or provider certification.
+- Strict TypeScript check passed.
+- Pinned Node 24.21.0 ran 38 tests: 23 passed, 15 environment-gated cases skipped, zero failed.
+- `LOCAL_NO_DOCKER=1 npm run test:integration` passed 35 tests with three live-provider skips against disposable local PostgreSQL.
+- PostgreSQL snapshot/restore matched 18 table digests in the local drill. A two-second loopback load harness smoke returned 20/20 responses.
+- Docker Compose built the app and started PostgreSQL 18 and the API on localhost. All 15 migrations and runtime-role provisioning completed; both containers reported healthy. The API returned `{"status":"ready"}`, and `pg_stat_ssl` showed the `drm_api` connection using TLS.
+- An operator-issued token authenticated to `/v1/library`. `scripts/smoke-standalone.ts` published an asset, retried with the same idempotency key, and found the asset in `/v1/creator/assets` against the running Docker stack.
+- A 10-second, 20-request/s readiness load check completed 200/200 requests with zero errors and 9.97 ms observed p95. It covers only the health/database query, not representative product capacity.
+- Failover, a full stack backup/restore, key recovery, public TLS, sustained load, and payment/provider certification remain **unverified**.
 
-## Next release gates
+## Release blockers
 
-The updated Docker image also built successfully and passed package/API imports as UID 1000 with a read-only filesystem and networking disabled. Its production dependency installation reported zero known vulnerabilities. This smoke test does not exercise configured service startup or a deployed gateway.
-
-1. Complete identity, catalog, ingestion, version management, commerce, creator and enterprise APIs and UI; deploy the outbox worker with an idempotent recipient and alerting.
-2. Deploy OpenBao, SeaweedFS, PostgreSQL, and OIDC with production TLS, scoped credentials, backup and restore, key rotation, audit, monitoring, and failover; verify those controls in staging.
-3. Implement and validate the required commercial DRM and protected clients against licensed providers and platforms. The generic secure-viewer format is only one distribution mode.
-4. Complete security, performance, compatibility, accessibility, and disaster-recovery campaigns before changing release status.
+1. Complete customer identity, administration, catalog ingestion and versioning, commerce/orders/ledger, payouts, UI, client enforcement, and the remaining product requirements in the [requirements audit](production-audit.md).
+2. Obtain Stripe credentials and required commercial DRM/provider agreements, then execute provider sandbox, certification, webhook replay, and live operational tests. The adapter alone cannot create real payments.
+3. Deploy a redundant Docker topology with a supported failover design for PostgreSQL, TLS at the public edge, monitored backups including key material, restore and failover exercises, and measured RPO/RTO. The current single-host Compose is an evaluation deployment.
+4. Qualify sustained representative load, security review, accessibility, incident response, and signed release artifacts before changing this gate.

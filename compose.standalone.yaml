@@ -1,0 +1,112 @@
+name: drm-standalone
+
+services:
+  postgres:
+    image: postgres:18.6@sha256:5a5a84b19854a9ffaa54082c166ff4ec27473a361e496e5ea167f298f2da9722
+    entrypoint: ["/bin/sh", "/opt/drm/postgres-entrypoint.sh"]
+    environment:
+      POSTGRES_DB: drm
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD_FILE: /run/secrets/owner-password
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+    volumes:
+      - postgres_data:/var/lib/postgresql
+      - ./infrastructure/docker/postgres-entrypoint.sh:/opt/drm/postgres-entrypoint.sh:ro
+    secrets: [owner-password, server-key, server-cert]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d drm"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+    networks: [private]
+
+  migrate:
+    build: .
+    command: ["sh", "-ec", "node --experimental-strip-types scripts/migrate.ts && node --experimental-strip-types scripts/provision-runtime.ts"]
+    environment:
+      MIGRATION_DATABASE_URL: postgresql://postgres@postgres:5432/drm
+      MIGRATION_DATABASE_CA_FILE: /run/secrets/ca-cert
+      MIGRATION_DATABASE_PASSWORD_FILE: /run/secrets/owner-password
+      API_DATABASE_PASSWORD_FILE: /run/secrets/api-password
+      WORKER_DATABASE_PASSWORD_FILE: /run/secrets/worker-password
+    secrets: [ca-cert, owner-password, api-password, worker-password]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    networks: [private]
+
+  api:
+    build: .
+    environment:
+      DATABASE_URL: postgresql://drm_api@postgres:5432/drm
+      DATABASE_CA_FILE: /run/secrets/ca-cert
+      DATABASE_PASSWORD_FILE: /run/secrets/api-password
+      KEY_PROVIDER: local
+      LOCAL_WRAPPING_KEY_FILE: /run/secrets/wrapping-key
+      LOCAL_SIGNING_KEY_FILE: /run/secrets/license-signing
+      LOCAL_KEY_VERSION: v1
+      AUTH_PROVIDER: local
+      LOCAL_AUTH_PUBLIC_KEY_FILE: /run/secrets/auth-public
+      LOCAL_AUTH_ISSUER: drm-local
+      LOCAL_AUTH_AUDIENCE: drm-api
+      PACKAGE_STORE: postgres
+      LICENSE_ISSUER: drm-local
+      LISTEN_HOST: 0.0.0.0
+      PORT: "8080"
+    ports:
+      - "127.0.0.1:8080:8080"
+    secrets: [ca-cert, api-password, wrapping-key, license-signing, auth-public]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+    restart: unless-stopped
+    networks: [private]
+
+  operator:
+    profiles: [ops]
+    build: .
+    command: ["node", "--version"]
+    environment:
+      MIGRATION_DATABASE_URL: postgresql://postgres@postgres:5432/drm
+      MIGRATION_DATABASE_CA_FILE: /run/secrets/ca-cert
+      MIGRATION_DATABASE_PASSWORD_FILE: /run/secrets/owner-password
+    secrets: [ca-cert, owner-password, auth-signing]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [private]
+
+networks:
+  private: {}
+
+volumes:
+  postgres_data: {}
+
+secrets:
+  owner-password:
+    file: ./.secrets/standalone/database/owner-password
+  api-password:
+    file: ./.secrets/standalone/database/api-password
+  worker-password:
+    file: ./.secrets/standalone/database/worker-password
+  ca-cert:
+    file: ./.secrets/standalone/database/ca.crt
+  server-key:
+    file: ./.secrets/standalone/database/server.key
+  server-cert:
+    file: ./.secrets/standalone/database/server.crt
+  wrapping-key:
+    file: ./.secrets/standalone/keys/wrapping-key
+  license-signing:
+    file: ./.secrets/standalone/keys/license-signing.pem
+  auth-public:
+    file: ./.secrets/standalone/keys/auth-public.pem
+  auth-signing:
+    file: ./.secrets/standalone/keys/auth-signing.pem

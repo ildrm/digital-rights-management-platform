@@ -19,6 +19,7 @@ GRANT SELECT ON drm.tenants, drm.users, drm.devices, drm.assets, drm.asset_versi
   drm.policies, drm.entitlements, drm.rendition_keys, drm.asset_packages, drm.licenses,
   drm.device_activations, drm.device_challenges, drm.device_enrollment_challenges,
   drm.api_rate_windows, drm.publication_operations TO drm_runtime_api;
+GRANT SELECT, INSERT, DELETE ON drm.package_objects TO drm_runtime_api;
 GRANT INSERT ON drm.devices, drm.assets, drm.asset_versions, drm.policies,
   drm.rendition_keys, drm.asset_packages, drm.licenses, drm.device_activations,
   drm.device_challenges, drm.device_enrollment_challenges, drm.api_rate_windows,

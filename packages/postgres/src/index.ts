@@ -6,3 +6,5 @@ export * from './outbox.ts';
 export * from './publishing.ts';
 export * from './maintenance.ts';
 export * from './package-reader.ts';
+export * from './catalog.ts';
+export * from './object-store.ts';
